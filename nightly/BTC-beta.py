@@ -89,6 +89,9 @@ class BacktestConfig:
     slippage_pct: float = 0.05
     min_hold_bars: int = 2
     cooldown_bars: int = 1
+    same_asset_cooldown_bars: int = 3
+    max_drawdown_limit_pct: float = 35.0
+    max_exposure_pct: float = 0.40
     tuned: TunedParams = field(default_factory=TunedParams)
 
 
@@ -854,6 +857,65 @@ def build_indicator_cache(
                 print(f"Indicator cache dropped: {t}")
     return out
 
+
+def compute_performance_metrics(
+    equity: List[float],
+    dates: List[pd.Timestamp],
+    trades: List[Dict[str, object]],
+    initial_capital: float,
+    timeframe: str,
+) -> Dict[str, object]:
+    if not equity or len(equity) < 2:
+        return {
+            "max_drawdown_pct": 0.0,
+            "sharpe": 0.0,
+            "sortino": 0.0,
+            "turnover_per_year": 0.0,
+            "avg_hold_days": 0.0,
+            "total_years": 0.0,
+            "asset_contrib": {},
+        }
+
+    eq = pd.Series(equity, dtype="float64")
+    running_max = eq.cummax()
+    dd = (eq / running_max - 1.0) * 100.0
+    max_dd = float(abs(dd.min())) if not dd.empty else 0.0
+
+    rets = eq.pct_change().dropna()
+    bpd = bars_per_day(timeframe)
+    bars_per_year = max(1.0, 365.25 * bpd)
+    mu = float(rets.mean()) if not rets.empty else 0.0
+    sigma = float(rets.std(ddof=0)) if not rets.empty else 0.0
+    sharpe = (mu / sigma) * np.sqrt(bars_per_year) if sigma > 0 else 0.0
+
+    downside = rets[rets < 0]
+    downside_std = float(downside.std(ddof=0)) if not downside.empty else 0.0
+    sortino = (mu / downside_std) * np.sqrt(bars_per_year) if downside_std > 0 else 0.0
+
+    start = pd.Timestamp(dates[0])
+    end = pd.Timestamp(dates[-1])
+    years = max(1e-9, (end - start).total_seconds() / (365.25 * 24 * 3600))
+    turnover = len(trades) / years
+
+    avg_hold = float(np.mean([float(t.get("Days Held", 0)) for t in trades])) if trades else 0.0
+
+    asset_contrib: Dict[str, float] = {}
+    for t in trades:
+        a = str(t.get("Asset", ""))
+        p = float(t.get("Profit $", 0.0))
+        asset_contrib[a] = asset_contrib.get(a, 0.0) + p
+    asset_contrib = dict(sorted(asset_contrib.items(), key=lambda kv: kv[1], reverse=True))
+
+    return {
+        "max_drawdown_pct": max_dd,
+        "sharpe": float(sharpe),
+        "sortino": float(sortino),
+        "turnover_per_year": float(turnover),
+        "avg_hold_days": avg_hold,
+        "total_years": float(years),
+        "asset_contrib": asset_contrib,
+    }
+
 def should_exit(
     hist: pd.DataFrame,
     entry_price: float,
@@ -964,6 +1026,7 @@ def simulate_backtest(
     entry_capital = 0.0
     bars_held = 0
     cooldown_remaining = 0
+    same_asset_cooldown_until: Dict[str, int] = {}
     capital = cfg.initial_capital
     max_hold_bars = max(1, int(np.ceil(cfg.max_hold_days * bars_per_day(timeframe))))
 
@@ -998,7 +1061,7 @@ def simulate_backtest(
         if not snap_rows:
             equity.append(equity[-1])
             if position == 1:
-                days_held += 1
+                bars_held += 1
             continue
 
         snap = pd.DataFrame(snap_rows).sort_values("Score", ascending=False).reset_index(drop=True)
@@ -1021,7 +1084,8 @@ def simulate_backtest(
         else:
             exit_now, reason = False, ""
 
-        if position == 0 and cooldown_remaining == 0 and top_rec in ["BUY", "STRONG BUY"]:
+        same_asset_ready = i >= int(same_asset_cooldown_until.get(top_ticker, -1))
+        if position == 0 and cooldown_remaining == 0 and same_asset_ready and top_rec in ["BUY", "STRONG BUY"]:
             position = 1
             entry_price = top_price * (1.0 + cfg.slippage_pct / 100.0)
             entry_date = d
@@ -1036,6 +1100,7 @@ def simulate_backtest(
                 print(f"BUY {entry_asset_label} {d.date()} @ {entry_price:.4f}")
 
         elif position == 1 and exit_now:
+            exited_ticker = entry_asset
             exit_price = held_price * (1.0 - cfg.slippage_pct / 100.0)
             pnl_pct = (exit_price / entry_price - 1.0) * 100 if entry_price > 0 else 0.0
             gross = entry_capital * (pnl_pct / 100.0)
@@ -1063,6 +1128,8 @@ def simulate_backtest(
             entry_asset = ""
             bars_held = 0
             cooldown_remaining = max(0, int(cfg.cooldown_bars))
+            if exited_ticker:
+                same_asset_cooldown_until[exited_ticker] = i + max(0, int(cfg.same_asset_cooldown_bars))
             equity.append(capital)
             if verbose:
                 print(f"SELL {d.date()} reason={reason} pnl={pnl_pct:+.2f}%")
@@ -1089,6 +1156,7 @@ def simulate_backtest(
         "trades": trades,
         "final": final,
         "return_pct": ret,
+        "metrics": compute_performance_metrics(equity, equity_dates, trades, cfg.initial_capital, timeframe),
     }
 
 
