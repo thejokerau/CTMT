@@ -26,8 +26,20 @@
 - Added anti-churn controls:
   - `min_hold_bars`
   - `cooldown_bars`
+- Added same-asset concentration control:
+  - `same_asset_cooldown_bars` (prevents immediate re-entry into the same ticker)
 - Added Binance symbol pre-filtering (`exchangeInfo`) for crypto top lists.
 - Updated `README.md` with nightly dependencies/features and runtime notes.
+- Added risk/robustness controls into optimizer objective:
+  - drawdown penalty (`max_drawdown_limit_pct`)
+  - exposure penalty (`max_exposure_pct`)
+  - turnover penalty
+- Added explicit train/validate/test split for auto-tune flow:
+  - walk-forward optimization on pre-holdout history
+  - final holdout summary on most recent window
+- Added post-backtest risk report:
+  - max drawdown, Sharpe, Sortino, turnover/year, avg hold days
+  - top per-asset PnL contribution
 
 ## Current Files of Interest
 - `nightly/BTC-beta.py`
@@ -38,6 +50,7 @@
 - yfinance intraday data quality/availability can vary by symbol and window.
 - CUDA path currently accelerates only a small numeric hotspot; most workload remains CPU/pandas-bound.
 - Walk-forward objective uses a no-trade penalty heuristic; may need tuning depending on strategy goals.
+- Current ranking remains single-position top-asset rotation; portfolio-level multi-asset allocation is not yet implemented.
 
 ## Run / Validate
 - Syntax check:
@@ -51,7 +64,7 @@
    - assets requested/loaded/dropped + reasons
    - trades count by exit type
    - average hold days and bars
-3. Add optional export of backtest trades/equity to CSV for external analysis.
+3. Add optional export of backtest trades/equity/metrics to CSV for external analysis.
 
 ## Process Rule (Required)
 - For every future code change in this project, update this file in the same change set:

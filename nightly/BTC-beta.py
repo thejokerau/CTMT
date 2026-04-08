@@ -1168,22 +1168,28 @@ def run_walk_forward_optuna(
     n_trials: int = 30,
     n_jobs: int = 1,
     indicator_cache: Optional[Dict[str, pd.DataFrame]] = None,
-) -> BacktestConfig:
+) -> Tuple[BacktestConfig, Optional[Dict[str, object]]]:
     if optuna is None:
         print("Optuna not installed; skipping auto-tune.")
-        return base_cfg
+        return base_cfg, None
 
     if not raw_data:
-        return base_cfg
+        return base_cfg, None
 
     anchor = list(raw_data.keys())[0]
     all_dates = raw_data[anchor].index.sort_values()
     if len(all_dates) < 220:
         print("Not enough history for walk-forward tuning.")
-        return base_cfg
+        return base_cfg, None
 
+    # Explicit split:
+    # - train/validate folds on earlier history
+    # - final holdout test on most recent ~0.5y
     train_days = int(round(1.5 * 365.25))
-    test_days = int(round(0.5 * 365.25))
+    val_days = int(round(0.5 * 365.25))
+    holdout_days = int(round(0.5 * 365.25))
+    holdout_start = all_dates[-1] - pd.Timedelta(days=holdout_days)
+    optimize_end = holdout_start - pd.Timedelta(seconds=1)
 
     def objective(trial: "optuna.Trial") -> float:
         tuned = TunedParams(
@@ -1200,19 +1206,29 @@ def run_walk_forward_optuna(
             stop_loss_pct=base_cfg.stop_loss_pct,
             take_profit_pct=base_cfg.take_profit_pct,
             max_hold_days=base_cfg.max_hold_days,
+            min_hold_bars=base_cfg.min_hold_bars,
+            cooldown_bars=base_cfg.cooldown_bars,
+            same_asset_cooldown_bars=base_cfg.same_asset_cooldown_bars,
+            max_drawdown_limit_pct=base_cfg.max_drawdown_limit_pct,
+            max_exposure_pct=base_cfg.max_exposure_pct,
             fee_pct=base_cfg.fee_pct,
             slippage_pct=base_cfg.slippage_pct,
             tuned=tuned,
         )
 
-        fold_returns = []
+        fold_returns: List[float] = []
+        fold_dd: List[float] = []
+        fold_turnover: List[float] = []
         walk_start = all_dates[0] + pd.Timedelta(days=train_days)
-        walk_end = all_dates[-1] - pd.Timedelta(days=test_days)
+        walk_end = optimize_end - pd.Timedelta(days=val_days)
         cursor = walk_start
+
+        if walk_end < walk_start:
+            return -999.0
 
         while cursor <= walk_end:
             test_start = cursor
-            test_end = cursor + pd.Timedelta(days=test_days)
+            test_end = cursor + pd.Timedelta(days=val_days)
             res = simulate_backtest(
                 raw_data,
                 timeframe,
@@ -1226,16 +1242,29 @@ def run_walk_forward_optuna(
             # Penalize parameter sets that do not produce trades during walk-forward.
             if len(res.get("trades", [])) == 0:
                 fold_returns.append(-0.25)
+                fold_dd.append(100.0)
+                fold_turnover.append(0.0)
             else:
                 fold_returns.append(float(res["return_pct"]))
-            cursor += pd.Timedelta(days=test_days)
+                m = res.get("metrics", {})
+                fold_dd.append(float(m.get("max_drawdown_pct", 100.0)))
+                fold_turnover.append(float(m.get("turnover_per_year", 0.0)))
+            cursor += pd.Timedelta(days=val_days)
 
         if not fold_returns:
             return -999.0
 
         mean_ret = float(np.mean(fold_returns))
         std_ret = float(np.std(fold_returns))
-        return mean_ret - 0.4 * std_ret
+        mean_dd = float(np.mean(fold_dd)) if fold_dd else 100.0
+        mean_turnover = float(np.mean(fold_turnover)) if fold_turnover else 0.0
+
+        # Objective: reward return stability, penalize excessive drawdown/exposure/churn.
+        score = mean_ret - 0.4 * std_ret
+        dd_penalty = max(0.0, mean_dd - cfg.max_drawdown_limit_pct) * 1.2
+        exposure_penalty = max(0.0, (cfg.tuned.position_size - cfg.max_exposure_pct) * 100.0) * 2.0
+        turnover_penalty = max(0.0, mean_turnover - 40.0) * 0.05
+        return score - dd_penalty - exposure_penalty - turnover_penalty
 
     study = optuna.create_study(direction="maximize")
     study.optimize(objective, n_trials=n_trials, n_jobs=max(1, int(n_jobs)), show_progress_bar=False)
@@ -1256,13 +1285,37 @@ def run_walk_forward_optuna(
         stop_loss_pct=base_cfg.stop_loss_pct,
         take_profit_pct=base_cfg.take_profit_pct,
         max_hold_days=base_cfg.max_hold_days,
+        min_hold_bars=base_cfg.min_hold_bars,
+        cooldown_bars=base_cfg.cooldown_bars,
+        same_asset_cooldown_bars=base_cfg.same_asset_cooldown_bars,
+        max_drawdown_limit_pct=base_cfg.max_drawdown_limit_pct,
+        max_exposure_pct=base_cfg.max_exposure_pct,
         fee_pct=base_cfg.fee_pct,
         slippage_pct=base_cfg.slippage_pct,
         tuned=tuned,
     )
     print("Auto-Tune complete. Best params:")
     print(bp)
-    return out
+
+    holdout = simulate_backtest(
+        raw_data,
+        timeframe,
+        out,
+        is_crypto,
+        start_date=holdout_start,
+        end_date=all_dates[-1],
+        indicator_cache=indicator_cache,
+        verbose=False,
+    )
+    hm = holdout.get("metrics", {})
+    print(
+        "Holdout test summary "
+        f"({holdout_start.date()} to {all_dates[-1].date()}): "
+        f"Return {holdout.get('return_pct', 0.0):+.2f}% | "
+        f"MaxDD {hm.get('max_drawdown_pct', 0.0):.2f}% | "
+        f"Sharpe {hm.get('sharpe', 0.0):.2f}"
+    )
+    return out, holdout
 
 def chart_top_asset(df: pd.DataFrame, label: str) -> None:
     chart = df.tail(220).copy()
@@ -1386,6 +1439,9 @@ def prompt_backtest_config() -> BacktestConfig:
     mh = read_int("Max hold days (default 45): ", 45)
     min_hold_bars = read_int("Minimum hold bars before signal-exit (default 2): ", 2)
     cooldown_bars = read_int("Cooldown bars after exit (default 1): ", 1)
+    same_asset_cd = read_int("Same-asset re-entry cooldown bars (default 3): ", 3)
+    max_dd_limit = read_float("Max drawdown target % for optimizer (default 35): ", 35.0)
+    max_exposure = read_float("Max exposure % for optimizer (default 40): ", 40.0) / 100.0
     fee = read_float("Fee % per trade leg (default 0.10): ", 0.10)
     slip = read_float("Slippage % per leg (default 0.05): ", 0.05)
 
@@ -1412,6 +1468,9 @@ def prompt_backtest_config() -> BacktestConfig:
         max_hold_days=mh,
         min_hold_bars=max(0, min_hold_bars),
         cooldown_bars=max(0, cooldown_bars),
+        same_asset_cooldown_bars=max(0, same_asset_cd),
+        max_drawdown_limit_pct=max(1.0, max_dd_limit),
+        max_exposure_pct=float(np.clip(max_exposure, 0.20, 1.0)),
         fee_pct=fee,
         slippage_pct=slip,
         tuned=tuned,
@@ -1524,6 +1583,7 @@ def main() -> None:
 
         else:
             cfg = prompt_backtest_config()
+            holdout_result = None
             bt_workers = prompt_cpu_workers("Backtest indicator cache")
             indicator_cache = build_indicator_cache(raw_data, timeframe, max_workers=bt_workers, verbose=True)
             if not indicator_cache:
@@ -1541,7 +1601,7 @@ def main() -> None:
                     n_jobs = int(n_jobs_in) if n_jobs_in else default_jobs
                 except ValueError:
                     n_jobs = max(1, min(8, (os.cpu_count() or 1)))
-                cfg = run_walk_forward_optuna(
+                cfg, holdout_result = run_walk_forward_optuna(
                     raw_data,
                     timeframe,
                     is_crypto,
@@ -1601,12 +1661,30 @@ def main() -> None:
                 print("No closed trades.")
                 win_rate = 0.0
 
+            metrics = result.get("metrics", {})
+            contrib = metrics.get("asset_contrib", {})
+            top_contrib = list(contrib.items())[:5] if isinstance(contrib, dict) else []
+
             print(f"\nFinal Value   : ${result['final']:,.2f}")
             print(f"Total Return  : {result['return_pct']:+.2f}%")
             print(f"Trades closed : {len(trades)}")
             print(f"Win rate      : {win_rate:.2f}%")
+            print(f"Max Drawdown  : {metrics.get('max_drawdown_pct', 0.0):.2f}%")
+            print(f"Sharpe/Sortino: {metrics.get('sharpe', 0.0):.2f} / {metrics.get('sortino', 0.0):.2f}")
+            print(f"Turnover/Year : {metrics.get('turnover_per_year', 0.0):.2f} trades")
+            print(f"Avg Hold Days : {metrics.get('avg_hold_days', 0.0):.2f}")
             print(f"Fee/Slippage  : {cfg.fee_pct}% / {cfg.slippage_pct}% per leg")
             print(f"Position size : {cfg.tuned.position_size*100:.1f}%")
+            if top_contrib:
+                print("Top Asset Contribution:")
+                for asset, pnl in top_contrib:
+                    print(f"  {asset:<8} ${pnl:,.2f}")
+            if holdout_result is not None:
+                hm = holdout_result.get("metrics", {})
+                print(
+                    f"Holdout (out-of-sample) Return: {holdout_result.get('return_pct', 0.0):+.2f}%  |  "
+                    f"MaxDD: {hm.get('max_drawdown_pct', 0.0):.2f}%  |  Sharpe: {hm.get('sharpe', 0.0):.2f}"
+                )
 
         input("\nPress Enter to return to main menu...")
 
