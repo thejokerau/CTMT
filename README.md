@@ -2,20 +2,43 @@ BTC3.py is current stable version
 
 
 BTC-Beta.py is buggy as hell - but starts to bring in daily, 12h and 4h measurments. 
-Mechanism in place to split data requests to Binance to accomodate 1000 results limitation to allow amount of days*intervals to exceed 1000 (365days*4hs=2190 results split over 3 calls to Binance)
 
 
+Install requirements:
+pip install pandas numpy plotly yfinance requests
 
-Upcoming enhancements - 
-*Sanitise code used to split calls to Binance
+Running the Dashboard
+Bash python BTC3.py
+On first run, the script will:
 
-*Ensure data is commited to DB to prevent overuse of API and date - A years worth of 4h data intervals should negate need for 12 hour report to pull down further data - only want deltas
+Create the SQLite database (crypto_data.db)
+Download initial market data (may take a few minutes)
+Subsequent runs are much faster thanks to caching
 
-*Need to change backtesting capital workflow to occur only when backtesting is called - reduce menu noise and better workflow
 
-*Abilty to save a preferences and load at time of accessing function to track user preference - may extend this record transactions - can save to user DB to preserve if crypto_data.db cache needs resetting - use export and import options or other means of secured backup and recovery.
+📁 Project Files
 
-*Use of API to manage trades - only after significant backtesting 
+BTC3.py — Main application (all logic)
+crypto_data.db — SQLite cache (auto-created, can be safely deleted)
 
-*Yearly results appear to be 30x12 days which is causing gap - should be 365 days per year
 
+⚠️ Current Limitations
+
+Uses daily data only (no 4H or intraday yet)
+Single-position backtesting (one asset held at a time)
+No live trading execution
+No multi-user or web interface yet
+
+
+🔮 Future Enhancements (Roadmap)
+
+Multi-timeframe support (4H, 1H, Weekly)
+Comparative view between Crypto and Traditional assets
+Configurable API keys and data sources
+Email/SMS notifications for signals
+Docker container for easy deployment
+Agentic AI / LLM integration for enhanced scoring
+
+
+Made with ❤️ for traders who want clean technical analysis and realistic backtesting.
+Feel free to fork, improve, or contribute!
