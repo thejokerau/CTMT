@@ -93,3 +93,40 @@ python nightly/BTC-beta.py
 
 On first run, the scripts will create/use `crypto_data.db` and populate market data.
 Subsequent runs are faster due to caching.
+
+## Automated Research Loop
+
+You can now run unattended experiment cycles that:
+
+1. Execute scheduled backtests + Optuna studies across `experiments/scenarios.json`
+2. Log artifacts into `experiments/runs/` and `experiments/candidates.jsonl`
+3. Promote winners into `experiments/registry/champions.json` using risk gates
+4. Refresh the automation section in `PROJECT_HANDOFF.md`
+
+Commands:
+
+```bash
+python scripts/run_experiments.py --enable-optuna
+python scripts/promote_champion.py
+python scripts/update_handoff.py
+```
+
+One-shot orchestrator:
+
+```bash
+python scripts/auto_research_cycle.py
+```
+
+Windows Task Scheduler helper:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\register_research_task.ps1 -TaskName CTMT_Nightly_Research -Time 02:00 -PythonExe python
+```
+
+Promotion gates (`scripts/promote_champion.py`) are conservative by default:
+
+- minimum return improvement: `+1.0%`
+- maximum drawdown increase allowed vs champion: `+1.5%`
+- maximum sharpe drop allowed vs champion: `-0.10`
+
+Detailed automation reference: `docs/AUTOMATION.md`

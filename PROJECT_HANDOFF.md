@@ -64,11 +64,28 @@
   - auto-detect emoji and ANSI-color capability at runtime
   - colorized labels when supported, plain text fallback otherwise
   - env overrides: `CTMT_DISABLE_EMOJI`, `NO_COLOR`, `FORCE_COLOR`
+- Added automated continuous-research pipeline:
+  - `scripts/run_experiments.py` for scenario backtests + Optuna tuning and artifact logging
+  - `scripts/promote_champion.py` for champion/challenger promotion with risk gates
+  - `scripts/update_handoff.py` for automatic handoff status block refresh
+  - `scripts/auto_research_cycle.py` orchestrator for end-to-end unattended cycles
+  - `scripts/register_research_task.ps1` helper for Windows Task Scheduler registration
+- Added experiment registry/config assets:
+  - `experiments/scenarios.json` default scenario set
+  - `experiments/registry/champions.json` champion parameter registry
+  - `.gitignore` updates for generated experiment artifacts (`runs`, `reports`, candidates log)
+- Updated `README.md` with automation workflow commands and promotion gate defaults
 
 ## Current Files of Interest
 - `nightly/BTC-beta.py`
 - `README.md`
 - `PROJECT_HANDOFF.md`
+- `scripts/run_experiments.py`
+- `scripts/promote_champion.py`
+- `scripts/update_handoff.py`
+- `scripts/auto_research_cycle.py`
+- `experiments/scenarios.json`
+- `experiments/registry/champions.json`
 
 ## Known Issues / Risks
 - Some CoinGecko symbols still may not be usable across all data providers; filtering now favors Binance tradability for crypto.
@@ -80,6 +97,8 @@
 - Live setup reliability statistics are heuristic and sample-size-sensitive for thin-history assets/timeframes.
 - Correlation-based live diversification notes use recent rolling history and may change quickly across volatile regimes.
 - Some terminals/fonts may still not render emoji markers even when source encoding is correct.
+- Automated experiment runs depend on live data provider availability and rate limits; failed data pulls can skip scenarios.
+- Champion registry updates are gate-based but still require human review before promoting to stable release behavior.
 
 ## Run / Validate
 - Syntax check:
@@ -89,14 +108,23 @@
 
 ## Recommended Next Tasks
 1. Add deterministic benchmark mode (fixed ticker set + timeframe + seed-like controls) to compare optimization changes across commits.
-2. Add a compact diagnostics report after each run:
+2. Extend automation outputs with per-scenario CSV exports (trades/equity/metrics) for offline analysis.
+3. Add a compact diagnostics report after each run:
    - assets requested/loaded/dropped + reasons
    - trades count by exit type
    - average hold days and bars
-3. Add optional export of backtest trades/equity/metrics/live setup-quality table to CSV for external analysis.
 
 ## Process Rule (Required)
 - For every future code change in this project, update this file in the same change set:
   - refresh **Completed**
   - update **Known Issues / Risks**
   - keep **Recommended Next Tasks** current
+
+<!-- AUTO_HANDBACK_START -->
+## Automated Research Status
+- Last update UTC: 2026-04-08T12:49:29+00:00
+- Latest experiment artifact: none
+- Champion scenarios tracked: 0
+- Latest run summary: no data
+<!-- AUTO_HANDBACK_END -->
+

@@ -1,2 +1,5 @@
 crypto_data.db
 crypto_data.db
+experiments/runs/
+experiments/reports/
+experiments/candidates.jsonl

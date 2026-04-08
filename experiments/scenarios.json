@@ -1,0 +1,30 @@
+[
+  {
+    "id": "crypto_1d_12m_top20",
+    "market": "crypto",
+    "timeframe": "1d",
+    "months": 12,
+    "top_n": 20
+  },
+  {
+    "id": "crypto_8h_12m_top20",
+    "market": "crypto",
+    "timeframe": "8h",
+    "months": 12,
+    "top_n": 20
+  },
+  {
+    "id": "crypto_8h_24m_top10",
+    "market": "crypto",
+    "timeframe": "8h",
+    "months": 24,
+    "top_n": 10
+  },
+  {
+    "id": "crypto_12h_24m_top10",
+    "market": "crypto",
+    "timeframe": "12h",
+    "months": 24,
+    "top_n": 10
+  }
+]
