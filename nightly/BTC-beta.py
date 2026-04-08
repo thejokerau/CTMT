@@ -5,6 +5,7 @@ import os
 import sqlite3
 import warnings
 import importlib.util
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -769,6 +770,46 @@ def build_live_tables(enriched: Dict[str, pd.DataFrame], is_crypto: bool, tuned:
 
     return table, risk
 
+
+def build_indicator_cache(
+    raw_data: Dict[str, pd.DataFrame],
+    timeframe: str,
+    max_workers: int = 1,
+    verbose: bool = False,
+) -> Dict[str, pd.DataFrame]:
+    """
+    Build indicators once per asset and reuse in backtests/optimization.
+    This removes repeated indicator recomputation from inner loops.
+    """
+    if not raw_data:
+        return {}
+
+    workers = max(1, int(max_workers))
+    out: Dict[str, pd.DataFrame] = {}
+
+    def _job(item: Tuple[str, pd.DataFrame]) -> Tuple[str, Optional[pd.DataFrame]]:
+        t, df = item
+        return t, compute_indicators(df, timeframe)
+
+    if workers == 1:
+        for t, df in raw_data.items():
+            ind = compute_indicators(df, timeframe)
+            if ind is not None and len(ind) >= 30:
+                out[t] = ind
+            elif verbose:
+                print(f"Indicator cache dropped: {t}")
+        return out
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_job, item) for item in raw_data.items()]
+        for fut in as_completed(futures):
+            t, ind = fut.result()
+            if ind is not None and len(ind) >= 30:
+                out[t] = ind
+            elif verbose:
+                print(f"Indicator cache dropped: {t}")
+    return out
+
 def should_exit(hist: pd.DataFrame, entry_price: float, days_held: int, cfg: BacktestConfig) -> Tuple[bool, str]:
     latest = hist.iloc[-1]
     current = float(latest.get("Close", entry_price))
@@ -807,22 +848,26 @@ def simulate_backtest(
     is_crypto: bool,
     start_date: Optional[pd.Timestamp] = None,
     end_date: Optional[pd.Timestamp] = None,
+    indicator_cache: Optional[Dict[str, pd.DataFrame]] = None,
     verbose: bool = False,
 ) -> Dict[str, object]:
     if not raw_data:
         return {"equity": [], "dates": [], "trades": [], "final": cfg.initial_capital, "return_pct": 0.0}
 
+    base = indicator_cache if indicator_cache is not None else build_indicator_cache(raw_data, timeframe, max_workers=1, verbose=False)
+    if not base:
+        return {"equity": [], "dates": [], "trades": [], "final": cfg.initial_capital, "return_pct": 0.0}
+
     enriched = {}
     dropped_assets = 0
-    for t, df in raw_data.items():
+    for t, df in base.items():
         use = df.copy()
         if start_date is not None:
             use = use[use.index >= start_date]
         if end_date is not None:
             use = use[use.index <= end_date]
-        use_ind = compute_indicators(use, timeframe)
-        if use_ind is not None and len(use_ind) >= 30:
-            enriched[t] = use_ind
+        if use is not None and len(use) >= 30:
+            enriched[t] = use
         else:
             dropped_assets += 1
 
@@ -868,16 +913,21 @@ def simulate_backtest(
     days_held = 0
     capital = cfg.initial_capital
 
-    for d in test_dates:
+    pos_lookup = {}
+    test_vals = test_dates.values
+    for t, df in enriched.items():
+        pos_lookup[t] = np.searchsorted(df.index.values, test_vals, side="right")
+
+    for i, d in enumerate(test_dates):
         equity_dates.append(d)
 
         snap_rows = []
         hist_lookup: Dict[str, pd.DataFrame] = {}
-        for t, full_df in raw_data.items():
-            hist_raw = full_df[full_df.index <= d]
-            hist = compute_indicators(hist_raw, timeframe)
-            if hist is None or len(hist) < 30:
+        for t, full_df in enriched.items():
+            pos = int(pos_lookup[t][i])
+            if pos < 30:
                 continue
+            hist = full_df.iloc[:pos]
             s, _, latest = score_asset(hist, cfg.tuned)
             rec = score_to_rec(s, cfg.tuned)
             hist_lookup[t] = hist
@@ -982,6 +1032,7 @@ def run_walk_forward_optuna(
     base_cfg: BacktestConfig,
     n_trials: int = 30,
     n_jobs: int = 1,
+    indicator_cache: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> BacktestConfig:
     if optuna is None:
         print("Optuna not installed; skipping auto-tune.")
@@ -1027,7 +1078,16 @@ def run_walk_forward_optuna(
         while cursor <= walk_end:
             test_start = cursor
             test_end = cursor + pd.Timedelta(days=test_days)
-            res = simulate_backtest(raw_data, timeframe, cfg, is_crypto, start_date=test_start, end_date=test_end, verbose=False)
+            res = simulate_backtest(
+                raw_data,
+                timeframe,
+                cfg,
+                is_crypto,
+                start_date=test_start,
+                end_date=test_end,
+                indicator_cache=indicator_cache,
+                verbose=False,
+            )
             # Penalize parameter sets that do not produce trades during walk-forward.
             if len(res.get("trades", [])) == 0:
                 fold_returns.append(-0.25)
@@ -1229,6 +1289,16 @@ def prompt_backtest_months() -> int:
     return months
 
 
+def prompt_cpu_workers(label: str) -> int:
+    default_workers = max(1, min(8, (os.cpu_count() or 1)))
+    try:
+        raw = input(f"{label} CPU workers (default {default_workers}): ").strip()
+        val = int(raw) if raw else default_workers
+        return max(1, val)
+    except ValueError:
+        return default_workers
+
+
 def main() -> None:
     global CUDA_AVAILABLE, CUDA_BACKEND, cp
     ensure_table()
@@ -1289,11 +1359,7 @@ def main() -> None:
 
         if not is_backtest:
             tuned = TunedParams()
-            enriched = {}
-            for t, df in raw_data.items():
-                ind = compute_indicators(df, timeframe)
-                if ind is not None:
-                    enriched[t] = ind
+            enriched = build_indicator_cache(raw_data, timeframe, max_workers=1, verbose=False)
 
             if not enriched:
                 print("No indicator-ready data.")
@@ -1319,6 +1385,11 @@ def main() -> None:
 
         else:
             cfg = prompt_backtest_config()
+            bt_workers = prompt_cpu_workers("Backtest indicator cache")
+            indicator_cache = build_indicator_cache(raw_data, timeframe, max_workers=bt_workers, verbose=True)
+            if not indicator_cache:
+                print("No indicator-ready data for backtest.")
+                continue
             if input("Enable Auto-Tune + Walk-Forward? (y/n): ").strip().lower() == "y":
                 try:
                     n_trials_in = input("Optuna trials (default 30): ").strip()
@@ -1331,7 +1402,15 @@ def main() -> None:
                     n_jobs = int(n_jobs_in) if n_jobs_in else default_jobs
                 except ValueError:
                     n_jobs = max(1, min(8, (os.cpu_count() or 1)))
-                cfg = run_walk_forward_optuna(raw_data, timeframe, is_crypto, cfg, n_trials=n_trials, n_jobs=n_jobs)
+                cfg = run_walk_forward_optuna(
+                    raw_data,
+                    timeframe,
+                    is_crypto,
+                    cfg,
+                    n_trials=n_trials,
+                    n_jobs=n_jobs,
+                    indicator_cache=indicator_cache,
+                )
 
             if backtest_months is None:
                 backtest_months = 12
@@ -1347,6 +1426,7 @@ def main() -> None:
                 is_crypto,
                 start_date=start_date,
                 end_date=end_date,
+                indicator_cache=indicator_cache,
                 verbose=True,
             )
             eq = result["equity"]
