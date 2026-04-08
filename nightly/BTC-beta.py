@@ -48,10 +48,10 @@ DB_PATH = "crypto_data.db"
 COINGECKO_KEY = ""
 
 TIMEFRAME_MENU = {
-    "1": ("1d", "1D"),
-    "2": ("4h", "4H"),
-    "3": ("8h", "8H"),
-    "4": ("12h", "12H"),
+    "1": ("1d", "1d"),
+    "2": ("4h", "4h"),
+    "3": ("8h", "8h"),
+    "4": ("12h", "12h"),
 }
 
 TRADITIONAL_TOP = {
@@ -87,6 +87,8 @@ class BacktestConfig:
     max_hold_days: int = 45
     fee_pct: float = 0.10
     slippage_pct: float = 0.05
+    min_hold_bars: int = 2
+    cooldown_bars: int = 1
     tuned: TunedParams = field(default_factory=TunedParams)
 
 
@@ -95,6 +97,7 @@ conn = sqlite3.connect(DB_PATH)
 CUDA_AVAILABLE = False
 CUDA_BACKEND = "cpu"
 cp = None
+_BINANCE_SPOT_SYMBOLS: Optional[set] = None
 
 
 def detect_cuda_backend() -> Tuple[bool, str, Optional[object]]:
@@ -245,6 +248,47 @@ def binance_symbol_from_ticker(ticker: str) -> str:
     return ticker.replace("-USD", "USDT") if "-USD" in ticker else f"{ticker}USDT"
 
 
+def get_binance_spot_symbols() -> set:
+    """
+    Load Binance tradable spot symbols once via exchangeInfo for pre-filtering.
+    """
+    global _BINANCE_SPOT_SYMBOLS
+    if _BINANCE_SPOT_SYMBOLS is not None:
+        return _BINANCE_SPOT_SYMBOLS
+    try:
+        r = requests.get("https://api.binance.com/api/v3/exchangeInfo", timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        symbols = set()
+        for s in data.get("symbols", []):
+            if s.get("status") == "TRADING":
+                sym = str(s.get("symbol", "")).upper()
+                if sym:
+                    symbols.add(sym)
+        _BINANCE_SPOT_SYMBOLS = symbols
+    except Exception:
+        _BINANCE_SPOT_SYMBOLS = set()
+    return _BINANCE_SPOT_SYMBOLS
+
+
+def filter_crypto_tickers_by_binance(tickers: List[str]) -> List[str]:
+    symbols = get_binance_spot_symbols()
+    if not symbols:
+        return tickers
+    kept = []
+    dropped = []
+    for t in tickers:
+        if binance_symbol_from_ticker(t) in symbols:
+            kept.append(t)
+        else:
+            dropped.append(t)
+    if dropped:
+        preview = ", ".join(dropped[:8])
+        more = f" (+{len(dropped) - 8} more)" if len(dropped) > 8 else ""
+        print(f"Filtered out non-Binance symbols: {preview}{more}")
+    return kept if kept else tickers
+
+
 def fetch_binance_paginated(symbol: str, interval: str, start: pd.Timestamp, end: pd.Timestamp) -> Optional[pd.DataFrame]:
     url = "https://api.binance.com/api/v3/klines"
     all_rows: List[list] = []
@@ -348,7 +392,7 @@ def fetch_from_yfinance(ticker: str, timeframe: str, years: float = 2.2, warmup_
         if base is None:
             return None
 
-        rule = {"4h": "4H", "8h": "8H", "12h": "12H"}[timeframe]
+        rule = {"4h": "4h", "8h": "8h", "12h": "12h"}[timeframe]
         return resample_ohlcv(base, rule)
     except Exception as e:
         print(f"   WARNING yfinance failed for {ticker}: {e}")
@@ -810,7 +854,14 @@ def build_indicator_cache(
                 print(f"Indicator cache dropped: {t}")
     return out
 
-def should_exit(hist: pd.DataFrame, entry_price: float, days_held: int, cfg: BacktestConfig) -> Tuple[bool, str]:
+def should_exit(
+    hist: pd.DataFrame,
+    entry_price: float,
+    holding_days: float,
+    bars_held: int,
+    max_hold_bars: int,
+    cfg: BacktestConfig,
+) -> Tuple[bool, str]:
     latest = hist.iloc[-1]
     current = float(latest.get("Close", entry_price))
 
@@ -832,10 +883,10 @@ def should_exit(hist: pd.DataFrame, entry_price: float, days_held: int, cfg: Bac
 
     score, _, _ = score_asset(hist, cfg.tuned)
     rec = score_to_rec(score, cfg.tuned)
-    if rec == "SELL":
+    if rec == "SELL" and bars_held >= cfg.min_hold_bars:
         return True, "SIGNAL SELL"
 
-    if days_held >= cfg.max_hold_days:
+    if holding_days >= cfg.max_hold_days or bars_held >= max_hold_bars:
         return True, f"MAX HOLD ({cfg.max_hold_days}d)"
 
     return False, ""
@@ -907,11 +958,14 @@ def simulate_backtest(
     position = 0
     entry_price = 0.0
     entry_date = None
+    entry_ts = None
     entry_asset = ""
     entry_asset_label = ""
     entry_capital = 0.0
-    days_held = 0
+    bars_held = 0
+    cooldown_remaining = 0
     capital = cfg.initial_capital
+    max_hold_bars = max(1, int(np.ceil(cfg.max_hold_days * bars_per_day(timeframe))))
 
     pos_lookup = {}
     test_vals = test_dates.values
@@ -954,21 +1008,30 @@ def simulate_backtest(
         top_rec = top["Recommendation"]
         held_price = float(snap.loc[snap["_Ticker"] == entry_asset, "_PriceRaw"].iloc[0]) if (position == 1 and entry_asset in set(snap["_Ticker"])) else entry_price
 
-        if position == 1 and entry_asset in hist_lookup:
-            exit_now, reason = should_exit(hist_lookup[entry_asset], entry_price, days_held, cfg)
+        if position == 1 and entry_asset in hist_lookup and entry_ts is not None:
+            holding_days = max(0.0, (pd.Timestamp(d) - pd.Timestamp(entry_ts)).total_seconds() / 86400.0)
+            exit_now, reason = should_exit(
+                hist_lookup[entry_asset],
+                entry_price,
+                holding_days,
+                bars_held,
+                max_hold_bars,
+                cfg,
+            )
         else:
             exit_now, reason = False, ""
 
-        if position == 0 and top_rec in ["BUY", "STRONG BUY"]:
+        if position == 0 and cooldown_remaining == 0 and top_rec in ["BUY", "STRONG BUY"]:
             position = 1
             entry_price = top_price * (1.0 + cfg.slippage_pct / 100.0)
             entry_date = d
+            entry_ts = pd.Timestamp(d)
             entry_asset = top_ticker
             entry_asset_label = top["Asset"]
             entry_capital = capital * cfg.tuned.position_size
             entry_fee = entry_capital * (cfg.fee_pct / 100.0)
             capital -= entry_fee
-            days_held = 0
+            bars_held = 0
             if verbose:
                 print(f"BUY {entry_asset_label} {d.date()} @ {entry_price:.4f}")
 
@@ -985,7 +1048,7 @@ def simulate_backtest(
                     "Entry Date": str(entry_date.date()) if entry_date is not None else "",
                     "Exit Date": str(d.date()),
                     "Asset": entry_asset_label,
-                    "Days Held": days_held + 1,
+                    "Days Held": int(np.floor(max(0.0, (pd.Timestamp(d) - pd.Timestamp(entry_ts)).total_seconds() / 86400.0))) + 1 if entry_ts is not None else 0,
                     "Entry $": round(entry_price, 4),
                     "Exit $": round(exit_price, 4),
                     "PnL %": round(pnl_pct, 2),
@@ -996,19 +1059,23 @@ def simulate_backtest(
             position = 0
             entry_price = 0.0
             entry_capital = 0.0
+            entry_ts = None
             entry_asset = ""
-            days_held = 0
+            bars_held = 0
+            cooldown_remaining = max(0, int(cfg.cooldown_bars))
             equity.append(capital)
             if verbose:
                 print(f"SELL {d.date()} reason={reason} pnl={pnl_pct:+.2f}%")
         else:
             if position == 1 and entry_price > 0:
-                days_held += 1
+                bars_held += 1
                 mtm_position = entry_capital * (held_price / entry_price)
                 unallocated = capital
                 equity.append(unallocated + mtm_position)
             else:
                 equity.append(capital)
+                if cooldown_remaining > 0:
+                    cooldown_remaining -= 1
 
     n = min(len(equity), len(equity_dates))
     equity = equity[:n]
@@ -1196,7 +1263,7 @@ def load_assets(is_crypto: bool) -> List[str]:
         print("1. Top 10   2. Top 20   3. Top 50   4. Top 100")
         n_choice = input("Enter 1-4: ").strip()
         n = {"1": 10, "2": 20, "3": 50, "4": 100}.get(n_choice, 20)
-        return fetch_top_coins(n)
+        return filter_crypto_tickers_by_binance(fetch_top_coins(n))
 
     print("Select Country/Region:")
     print("1. Australia  2. United States  3. United Kingdom  4. Europe  5. Canada  6. Other")
@@ -1249,6 +1316,8 @@ def prompt_backtest_config() -> BacktestConfig:
     sl = read_float("Stop-loss % (default 8): ", 8.0)
     tp = read_float("Take-profit % (default 20): ", 20.0)
     mh = read_int("Max hold days (default 45): ", 45)
+    min_hold_bars = read_int("Minimum hold bars before signal-exit (default 2): ", 2)
+    cooldown_bars = read_int("Cooldown bars after exit (default 1): ", 1)
     fee = read_float("Fee % per trade leg (default 0.10): ", 0.10)
     slip = read_float("Slippage % per leg (default 0.05): ", 0.05)
 
@@ -1273,6 +1342,8 @@ def prompt_backtest_config() -> BacktestConfig:
         stop_loss_pct=sl,
         take_profit_pct=tp,
         max_hold_days=mh,
+        min_hold_bars=max(0, min_hold_bars),
+        cooldown_bars=max(0, cooldown_bars),
         fee_pct=fee,
         slippage_pct=slip,
         tuned=tuned,
