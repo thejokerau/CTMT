@@ -1,5 +1,6 @@
 import sys
 import time
+import re
 import sqlite3
 import warnings
 from dataclasses import dataclass, field
@@ -370,11 +371,16 @@ def fetch_top_coins(n: int) -> List[str]:
             timeout=20,
         )
         r.raise_for_status()
-        tickers = [
-            f"{coin['symbol'].upper()}-USD"
-            for coin in r.json()
-            if coin.get("symbol", "").upper() not in ["USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "BUSD"]
-        ]
+        tickers = []
+        for coin in r.json():
+            raw_sym = coin.get("symbol", "").upper()
+            if raw_sym in ["USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "BUSD"]:
+                continue
+            # Keep only exchange-safe alphanumeric symbols to avoid malformed pairs/tickers.
+            clean_sym = re.sub(r"[^A-Z0-9]", "", raw_sym)
+            if not clean_sym:
+                continue
+            tickers.append(f"{clean_sym}-USD")
     except Exception as e:
         print(f"   WARNING CoinGecko failed: {e}")
         tickers = []
@@ -480,26 +486,48 @@ def compute_indicators(df: pd.DataFrame, timeframe: str) -> Optional[pd.DataFram
         return None
 
     out = df.copy()
+    def pick_col(frame: pd.DataFrame, starts_with: List[str]) -> Optional[str]:
+        if frame is None or frame.empty:
+            return None
+        for sw in starts_with:
+            for c in frame.columns:
+                if str(c).upper().startswith(sw.upper()):
+                    return c
+        return None
+
     out["RSI"] = ta.rsi(out["Close"], length=14)
     macd = ta.macd(out["Close"], fast=12, slow=26, signal=9)
     if macd is None or macd.empty:
         return None
-    out["MACD"] = macd.get("MACD_12_26_9")
-    out["MACD_Signal"] = macd.get("MACDs_12_26_9")
-    out["MACD_Hist"] = macd.get("MACDh_12_26_9")
+    macd_col = pick_col(macd, ["MACD_"])
+    macd_sig_col = pick_col(macd, ["MACDS_", "MACDSIGNAL_", "SIGNAL_"])
+    macd_hist_col = pick_col(macd, ["MACDH_", "MACDHIST_"])
+    if not macd_col or not macd_sig_col:
+        return None
+    out["MACD"] = macd[macd_col]
+    out["MACD_Signal"] = macd[macd_sig_col]
+    out["MACD_Hist"] = macd[macd_hist_col] if macd_hist_col else (out["MACD"] - out["MACD_Signal"])
 
     bb = ta.bbands(out["Close"], length=20, std=2)
     if bb is None or bb.empty:
         return None
-    out["BB_Upper"] = bb.get("BBU_20_2.0")
-    out["BB_Middle"] = bb.get("BBM_20_2.0")
-    out["BB_Lower"] = bb.get("BBL_20_2.0")
+    bb_u = pick_col(bb, ["BBU_"])
+    bb_m = pick_col(bb, ["BBM_"])
+    bb_l = pick_col(bb, ["BBL_"])
+    if not bb_u or not bb_m or not bb_l:
+        return None
+    out["BB_Upper"] = bb[bb_u]
+    out["BB_Middle"] = bb[bb_m]
+    out["BB_Lower"] = bb[bb_l]
 
     out["ATR"] = ta.atr(out["High"], out["Low"], out["Close"], length=14)
     adx = ta.adx(out["High"], out["Low"], out["Close"], length=14)
     if adx is None or adx.empty:
         return None
-    out["ADX"] = adx.get("ADX_14")
+    adx_col = pick_col(adx, ["ADX_"])
+    if not adx_col:
+        return None
+    out["ADX"] = adx[adx_col]
 
     out["OBV"] = ta.obv(out["Close"], out["Volume"])
     out["CMF"] = ta.cmf(out["High"], out["Low"], out["Close"], out["Volume"], length=20)
