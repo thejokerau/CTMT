@@ -1,6 +1,7 @@
 import sys
 import time
 import re
+import os
 import sqlite3
 import warnings
 from dataclasses import dataclass, field
@@ -947,6 +948,7 @@ def run_walk_forward_optuna(
     is_crypto: bool,
     base_cfg: BacktestConfig,
     n_trials: int = 30,
+    n_jobs: int = 1,
 ) -> BacktestConfig:
     if optuna is None:
         print("Optuna not installed; skipping auto-tune.")
@@ -1008,7 +1010,7 @@ def run_walk_forward_optuna(
         return mean_ret - 0.4 * std_ret
 
     study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    study.optimize(objective, n_trials=n_trials, n_jobs=max(1, int(n_jobs)), show_progress_bar=False)
 
     bp = study.best_params
     tuned = TunedParams(
@@ -1184,6 +1186,16 @@ def prompt_backtest_config() -> BacktestConfig:
     )
 
 
+def prompt_backtest_months() -> int:
+    print("Backtest lookback:")
+    print("1. 1 month   2. 3 months   3. 6 months   4. 12 months   5. 18 months   6. 24 months")
+    ch = input("Enter 1-6 (default 4): ").strip() or "4"
+    months = {"1": 1, "2": 3, "3": 6, "4": 12, "5": 18, "6": 24}.get(ch, 12)
+    approx_days = int(round(months * 365.25 / 12.0))
+    print(f"Backtest window set: {months} month(s) (~{approx_days} days using 365.25-day year).")
+    return months
+
+
 def main() -> None:
     ensure_table()
 
@@ -1216,6 +1228,7 @@ def main() -> None:
         print("2. Backtest + Equity Curve")
         mode = input("Enter 1 or 2: ").strip()
         is_backtest = mode == "2"
+        backtest_months = prompt_backtest_months() if is_backtest else None
 
         tickers = load_assets(is_crypto)
         if not tickers:
@@ -1223,9 +1236,13 @@ def main() -> None:
             continue
 
         print(f"Selected {len(tickers)} assets. Loading {timeframe} data...")
+        fetch_years = 2.2
+        if is_backtest and backtest_months is not None:
+            # Keep enough history for indicators/Fibonacci warm-up while still honoring chosen test window.
+            fetch_years = max(2.2, (backtest_months / 12.0) + 0.25)
         raw_data: Dict[str, pd.DataFrame] = {}
         for t in tickers:
-            df = fetch_with_cache(t, timeframe, is_crypto=is_crypto, years=2.2)
+            df = fetch_with_cache(t, timeframe, is_crypto=is_crypto, years=fetch_years)
             if df is not None and len(df) >= 60:
                 raw_data[t] = df
 
@@ -1272,9 +1289,30 @@ def main() -> None:
                     n_trials = int(n_trials_in) if n_trials_in else 30
                 except ValueError:
                     n_trials = 30
-                cfg = run_walk_forward_optuna(raw_data, timeframe, is_crypto, cfg, n_trials=n_trials)
+                try:
+                    default_jobs = max(1, min(8, (os.cpu_count() or 1)))
+                    n_jobs_in = input(f"Optuna parallel jobs (default {default_jobs}): ").strip()
+                    n_jobs = int(n_jobs_in) if n_jobs_in else default_jobs
+                except ValueError:
+                    n_jobs = max(1, min(8, (os.cpu_count() or 1)))
+                cfg = run_walk_forward_optuna(raw_data, timeframe, is_crypto, cfg, n_trials=n_trials, n_jobs=n_jobs)
 
-            result = simulate_backtest(raw_data, timeframe, cfg, is_crypto, verbose=True)
+            if backtest_months is None:
+                backtest_months = 12
+            backtest_days = int(round(backtest_months * 365.25 / 12.0))
+            anchor = list(raw_data.keys())[0]
+            end_date = raw_data[anchor].index.max()
+            start_date = end_date - pd.Timedelta(days=backtest_days)
+
+            result = simulate_backtest(
+                raw_data,
+                timeframe,
+                cfg,
+                is_crypto,
+                start_date=start_date,
+                end_date=end_date,
+                verbose=True,
+            )
             eq = result["equity"]
             dts = result["dates"]
             trades = result["trades"]
