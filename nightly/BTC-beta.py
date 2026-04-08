@@ -2,11 +2,13 @@ import sys
 import time
 import re
 import os
+import json
 import sqlite3
 import warnings
 import importlib.util
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -46,6 +48,7 @@ print("Crypto & Traditional Risk Dashboard (Nightly Quant)")
 
 DB_PATH = "crypto_data.db"
 COINGECKO_KEY = ""
+CHAMPION_REGISTRY_PATH = Path("experiments") / "registry" / "champions.json"
 
 TIMEFRAME_MENU = {
     "1": ("1d", "1d"),
@@ -1776,6 +1779,133 @@ def prompt_cpu_workers(label: str) -> int:
         return default_workers
 
 
+def load_champion_registry() -> Dict[str, dict]:
+    if not CHAMPION_REGISTRY_PATH.exists():
+        return {}
+    try:
+        data = json.loads(CHAMPION_REGISTRY_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def parse_scenario_id(sid: str) -> Dict[str, Optional[int]]:
+    """
+    Parse scenario ids like:
+      crypto_8h_24m_top10
+      traditional_1d_12m
+    """
+    out: Dict[str, Optional[int]] = {"market": None, "timeframe": None, "months": None, "top_n": None}
+    m = re.match(r"^(crypto|traditional)_(1d|4h|8h|12h)_(\d+)m(?:_top(\d+))?$", str(sid).strip().lower())
+    if not m:
+        return out
+    out["market"] = m.group(1)
+    out["timeframe"] = m.group(2)
+    out["months"] = int(m.group(3))
+    out["top_n"] = int(m.group(4)) if m.group(4) else None
+    return out
+
+
+def find_best_champion_match(
+    champions: Dict[str, dict],
+    market: str,
+    timeframe: str,
+    months: Optional[int],
+    requested_assets: Optional[int],
+) -> Tuple[Optional[str], Optional[dict]]:
+    if not champions:
+        return None, None
+
+    best_sid: Optional[str] = None
+    best_entry: Optional[dict] = None
+    best_score = -1e9
+
+    for sid, entry in champions.items():
+        if not isinstance(entry, dict):
+            continue
+        parsed = parse_scenario_id(sid)
+        if parsed.get("market") is None or parsed.get("timeframe") is None:
+            continue
+        if str(parsed["market"]) != market:
+            continue
+        if str(parsed["timeframe"]) != timeframe:
+            continue
+        if not isinstance((entry.get("selected", {}) or {}).get("config", {}), dict):
+            continue
+
+        score = 0.0
+        score += 10.0
+
+        cm = parsed.get("months")
+        if months is not None and cm is not None:
+            score -= abs(int(months) - int(cm)) * 0.25
+            if int(months) == int(cm):
+                score += 4.0
+        elif cm is not None:
+            score += 1.0
+
+        ct = parsed.get("top_n")
+        if requested_assets is not None and ct is not None:
+            if int(ct) == int(requested_assets):
+                score += 2.5
+            elif abs(int(ct) - int(requested_assets)) <= 5:
+                score += 1.0
+
+        metrics = entry.get("metrics", {}) or {}
+        score += float(metrics.get("sharpe", 0.0)) * 0.2
+        score += float(metrics.get("return_pct", 0.0)) * 0.02
+        score -= max(0.0, float(metrics.get("max_drawdown_pct", 0.0)) - 35.0) * 0.03
+
+        if score > best_score:
+            best_score = score
+            best_sid = str(sid)
+            best_entry = entry
+
+    return best_sid, best_entry
+
+
+def champion_summary_line(sid: str, entry: dict) -> str:
+    m = entry.get("metrics", {}) or {}
+    return (
+        f"Champion match `{sid}` | Return {float(m.get('return_pct', 0.0)):+.2f}% | "
+        f"MaxDD {float(m.get('max_drawdown_pct', 0.0)):.2f}% | Sharpe {float(m.get('sharpe', 0.0)):.2f}"
+    )
+
+
+def apply_champion_tuned_params(base_tuned: TunedParams, champion_entry: dict) -> TunedParams:
+    cfg = ((champion_entry.get("selected", {}) or {}).get("config", {}) or {})
+    t = cfg.get("tuned", {}) or {}
+    return TunedParams(
+        position_size=float(np.clip(float(t.get("position_size", base_tuned.position_size)), 0.20, 0.40)),
+        atr_multiplier=float(np.clip(float(t.get("atr_multiplier", base_tuned.atr_multiplier)), 2.0, 2.5)),
+        adx_threshold=float(t.get("adx_threshold", base_tuned.adx_threshold)),
+        cmf_threshold=float(t.get("cmf_threshold", base_tuned.cmf_threshold)),
+        obv_slope_threshold=float(t.get("obv_slope_threshold", base_tuned.obv_slope_threshold)),
+        buy_threshold=int(t.get("buy_threshold", base_tuned.buy_threshold)),
+        sell_threshold=int(t.get("sell_threshold", base_tuned.sell_threshold)),
+    )
+
+
+def apply_champion_backtest_config(base_cfg: BacktestConfig, champion_entry: dict) -> BacktestConfig:
+    cfg = ((champion_entry.get("selected", {}) or {}).get("config", {}) or {})
+    tuned = apply_champion_tuned_params(base_cfg.tuned, champion_entry)
+    return BacktestConfig(
+        initial_capital=float(cfg.get("initial_capital", base_cfg.initial_capital)),
+        stop_loss_pct=float(cfg.get("stop_loss_pct", base_cfg.stop_loss_pct)),
+        take_profit_pct=float(cfg.get("take_profit_pct", base_cfg.take_profit_pct)),
+        max_hold_days=int(cfg.get("max_hold_days", base_cfg.max_hold_days)),
+        fee_pct=float(cfg.get("fee_pct", base_cfg.fee_pct)),
+        slippage_pct=float(cfg.get("slippage_pct", base_cfg.slippage_pct)),
+        min_hold_bars=max(0, int(cfg.get("min_hold_bars", base_cfg.min_hold_bars))),
+        cooldown_bars=max(0, int(cfg.get("cooldown_bars", base_cfg.cooldown_bars))),
+        same_asset_cooldown_bars=max(0, int(cfg.get("same_asset_cooldown_bars", base_cfg.same_asset_cooldown_bars))),
+        max_consecutive_same_asset_entries=max(1, int(cfg.get("max_consecutive_same_asset_entries", base_cfg.max_consecutive_same_asset_entries))),
+        max_drawdown_limit_pct=max(1.0, float(cfg.get("max_drawdown_limit_pct", base_cfg.max_drawdown_limit_pct))),
+        max_exposure_pct=float(np.clip(float(cfg.get("max_exposure_pct", base_cfg.max_exposure_pct)), 0.20, 1.0)),
+        tuned=tuned,
+    )
+
+
 def main() -> None:
     global CUDA_AVAILABLE, CUDA_BACKEND, cp, EMOJI_ENABLED, COLOR_ENABLED
     ensure_table()
@@ -1837,8 +1967,24 @@ def main() -> None:
             print("No usable data.")
             continue
 
+        champions = load_champion_registry()
+        market_label = "crypto" if is_crypto else "traditional"
+
         if not is_backtest:
             tuned = TunedParams()
+            sid, champion = find_best_champion_match(
+                champions,
+                market=market_label,
+                timeframe=timeframe,
+                months=None,
+                requested_assets=len(tickers),
+            )
+            if champion is not None and sid is not None:
+                print(champion_summary_line(sid, champion))
+                use_ch = (input("Use champion tuned params for live scoring? (y/n, default y): ").strip().lower() or "y") == "y"
+                if use_ch:
+                    tuned = apply_champion_tuned_params(tuned, champion)
+                    print("Applied champion tuned params for live dashboard scoring.")
             enriched = build_indicator_cache(raw_data, timeframe, max_workers=1, verbose=False)
 
             if not enriched:
@@ -1873,6 +2019,19 @@ def main() -> None:
 
         else:
             cfg = prompt_backtest_config(timeframe)
+            sid, champion = find_best_champion_match(
+                champions,
+                market=market_label,
+                timeframe=timeframe,
+                months=backtest_months,
+                requested_assets=len(tickers),
+            )
+            if champion is not None and sid is not None:
+                print(champion_summary_line(sid, champion))
+                use_ch = (input("Replace current backtest settings with champion config? (y/n, default y): ").strip().lower() or "y") == "y"
+                if use_ch:
+                    cfg = apply_champion_backtest_config(cfg, champion)
+                    print("Applied champion backtest config.")
             holdout_result = None
             bt_workers = prompt_cpu_workers("Backtest indicator cache")
             indicator_cache = build_indicator_cache(raw_data, timeframe, max_workers=bt_workers, verbose=True)

@@ -75,6 +75,11 @@
   - `experiments/registry/champions.json` champion parameter registry
   - `.gitignore` updates for generated experiment artifacts (`runs`, `reports`, candidates log)
 - Updated `README.md` with automation workflow commands and promotion gate defaults
+- Added runtime champion auto-suggestion in nightly:
+  - loads `experiments/registry/champions.json`
+  - matches best champion by market/timeframe/lookback/asset-count context
+  - prompts to apply champion tuned params in live mode
+  - prompts to replace backtest config with champion settings in backtest mode
 
 ## Current Files of Interest
 - `nightly/BTC-beta.py`
@@ -99,6 +104,7 @@
 - Some terminals/fonts may still not render emoji markers even when source encoding is correct.
 - Automated experiment runs depend on live data provider availability and rate limits; failed data pulls can skip scenarios.
 - Champion registry updates are gate-based but still require human review before promoting to stable release behavior.
+- Champion matching is heuristic-based; when multiple close candidates exist, manual confirmation prompt remains the final safeguard.
 
 ## Run / Validate
 - Syntax check:
@@ -109,7 +115,7 @@
 ## Recommended Next Tasks
 1. Add deterministic benchmark mode (fixed ticker set + timeframe + seed-like controls) to compare optimization changes across commits.
 2. Extend automation outputs with per-scenario CSV exports (trades/equity/metrics) for offline analysis.
-3. Add a compact diagnostics report after each run:
+3. Add champion confidence scoring and tie-break transparency in runtime prompt (why this champion was chosen).
    - assets requested/loaded/dropped + reasons
    - trades count by exit type
    - average hold days and bars
@@ -122,7 +128,7 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-08T12:49:29+00:00
+- Last update UTC: 2026-04-08T12:55:56+00:00
 - Latest experiment artifact: none
 - Champion scenarios tracked: 0
 - Latest run summary: no data

@@ -130,3 +130,17 @@ Promotion gates (`scripts/promote_champion.py`) are conservative by default:
 - maximum sharpe drop allowed vs champion: `-0.10`
 
 Detailed automation reference: `docs/AUTOMATION.md`
+
+### Runtime Champion Suggestions
+
+`nightly/BTC-beta.py` now reads `experiments/registry/champions.json` at runtime and tries to match the current context:
+
+- market (`crypto` / `traditional`)
+- timeframe (`1d`, `4h`, `8h`, `12h`)
+- backtest lookback months (when in backtest mode)
+- approximate asset count context
+
+When a match is found, the script shows champion metrics and prompts to apply:
+
+- Live mode: apply champion tuned parameters for scoring.
+- Backtest mode: replace entered settings with champion config.
