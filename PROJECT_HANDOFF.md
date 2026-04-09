@@ -88,6 +88,10 @@
 - Added Grok auto-feed from latest live snapshot:
   - each Live Dashboard run now saves snapshot text to `experiments/live_snapshots/`
   - Grok mode can consume `latest_live_dashboard.txt` without manual paste
+- Improved Grok API diagnostics and resilience:
+  - startup prints Grok key/model status
+  - API failures now surface HTTP status + truncated response body
+  - automatic model alias fallback attempts reduce invalid-model 400 failures
 - Updated `README.md` with Grok mode workflow and env-var configuration (`XAI_API_KEY`, `CTMT_GROK_MODEL`, `XAI_API_URL`)
 - Fixed cache date parsing compatibility bug:
   - `get_cached()` now parses mixed legacy date formats (`YYYY-MM-DD` and `YYYY-MM-DD HH:MM:SS`)
@@ -143,7 +147,7 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-09T09:17:35+00:00
+- Last update UTC: 2026-04-09T09:26:37+00:00
 - Latest experiment artifact: `experiments/runs/run_20260408T131249Z.json`
 - Champion scenarios tracked: 1
 - Latest run summary:

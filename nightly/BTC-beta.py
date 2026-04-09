@@ -2041,35 +2041,66 @@ def call_xai_grok(prompt: str) -> Optional[str]:
         return None
 
     endpoint = (os.getenv("XAI_API_URL", "https://api.x.ai/v1/chat/completions") or "").strip()
-    model = (os.getenv("CTMT_GROK_MODEL", "grok-3-mini") or "").strip()
-
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": "You are Grok, built by xAI."},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2,
-    }
+    configured_model = (os.getenv("CTMT_GROK_MODEL", "grok-3-mini") or "").strip()
+    model_candidates: List[str] = []
+    # Try configured model first, then common aliases to reduce "invalid model" 400s.
+    for m in [
+        configured_model,
+        configured_model.replace(".", "-"),
+        "grok-4-1-fast-reasoning",
+        "grok-4-1-fast",
+        "grok-3-mini",
+    ]:
+        m = (m or "").strip()
+        if m and m not in model_candidates:
+            model_candidates.append(m)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    try:
-        r = requests.post(endpoint, headers=headers, json=payload, timeout=180)
-        r.raise_for_status()
-        data = r.json()
-        choices = data.get("choices", [])
-        if not choices:
-            return None
-        msg = choices[0].get("message", {}) or {}
-        content = msg.get("content")
-        if isinstance(content, str):
-            return content.strip()
-        return str(content).strip() if content is not None else None
-    except Exception as e:
-        print(f"Grok API call failed: {e}")
-        return None
+    last_status = None
+    last_body = ""
+    for model in model_candidates:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are Grok, built by xAI."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+        }
+        try:
+            r = requests.post(endpoint, headers=headers, json=payload, timeout=180)
+            if 200 <= r.status_code < 300:
+                data = r.json()
+                choices = data.get("choices", [])
+                if not choices:
+                    print(f"Grok API returned success with empty choices for model `{model}`.")
+                    return None
+                msg = choices[0].get("message", {}) or {}
+                content = msg.get("content")
+                if isinstance(content, str):
+                    return content.strip()
+                return str(content).strip() if content is not None else None
+
+            last_status = r.status_code
+            last_body = (r.text or "")[:1000]
+            print(f"Grok API call failed for model `{model}` with status {r.status_code}.")
+            # If it's not a bad-request style issue, stop retrying aliases.
+            if r.status_code not in (400, 404):
+                break
+        except Exception as e:
+            print(f"Grok API transport error for model `{model}`: {e}")
+            last_status = -1
+            last_body = str(e)
+            break
+
+    if last_status is not None:
+        print(f"Last Grok API error status: {last_status}")
+    if last_body:
+        print("Last Grok API error body (truncated):")
+        print(last_body)
+    return None
 
 
 def run_grok_analysis_mode() -> None:
@@ -2133,6 +2164,9 @@ def main() -> None:
     print(f"Runtime acceleration backend: {CUDA_BACKEND}")
     display_mode = "emoji+color" if (EMOJI_ENABLED and COLOR_ENABLED) else ("emoji" if EMOJI_ENABLED else ("color" if COLOR_ENABLED else "plain-text"))
     print(f"Action label display mode: {display_mode}")
+    grok_key_set = "yes" if (os.getenv("XAI_API_KEY", "") or "").strip() else "no"
+    grok_model = (os.getenv("CTMT_GROK_MODEL", "grok-3-mini") or "").strip()
+    print(f"Grok API configured: key={grok_key_set}, model={grok_model}")
 
     while True:
         print("\n" + "=" * 100)

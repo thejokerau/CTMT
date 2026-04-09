@@ -174,3 +174,9 @@ Environment variables for direct API mode:
 - `XAI_API_KEY` (required for API call)
 - `CTMT_GROK_MODEL` (optional, default `grok-3-mini`)
 - `XAI_API_URL` (optional, default `https://api.x.ai/v1/chat/completions`)
+
+Diagnostics:
+
+- Startup now prints Grok API config status (`key=yes/no`, active model).
+- On API failure, nightly prints HTTP status and truncated response body.
+- Model alias fallback is attempted automatically (including `grok-4-1-fast-reasoning` style names).
