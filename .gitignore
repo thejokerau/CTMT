@@ -6,4 +6,5 @@
 **/experiments/reports/
 **/experiments/candidates.jsonl
 **/experiments/live_snapshots/
+**/experiments/backtest_snapshots/
 **/experiments/grok/

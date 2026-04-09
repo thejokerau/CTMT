@@ -161,6 +161,7 @@ Flow:
 2. Choose source:
    - paste dashboard output manually, or
    - use latest saved Live Dashboard snapshot.
+   - use latest saved Backtest snapshot.
 3. If pasting manually, enter `END` on a new line.
 4. Choose whether to send directly to xAI Grok API.
 
@@ -168,6 +169,11 @@ Live snapshots are auto-saved every time Live Dashboard runs:
 
 - `experiments/live_snapshots/live_dashboard_<timestamp>.txt`
 - `experiments/live_snapshots/latest_live_dashboard.txt`
+
+Backtest snapshots are auto-saved every time Backtest mode runs:
+
+- `experiments/backtest_snapshots/backtest_<timestamp>.txt`
+- `experiments/backtest_snapshots/latest_backtest.txt`
 
 Environment variables for direct API mode:
 

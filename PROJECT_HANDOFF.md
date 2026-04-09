@@ -88,6 +88,9 @@
 - Added Grok auto-feed from latest live snapshot:
   - each Live Dashboard run now saves snapshot text to `experiments/live_snapshots/`
   - Grok mode can consume `latest_live_dashboard.txt` without manual paste
+- Added Backtest -> Grok one-click feed:
+  - each Backtest run now saves snapshot text to `experiments/backtest_snapshots/`
+  - Grok mode source selector now supports `latest_backtest.txt`
 - Improved Grok API diagnostics and resilience:
   - startup prints Grok key/model status
   - API failures now surface HTTP status + truncated response body
@@ -123,6 +126,7 @@
 - Champion matching is heuristic-based; when multiple close candidates exist, manual confirmation prompt remains the final safeguard.
 - Direct xAI API execution in Grok mode depends on network availability, endpoint compatibility, and valid API credentials.
 - Live snapshot and Grok artifact directories are generated outputs and are now git-ignored.
+- Backtest snapshot artifacts are generated outputs and are now git-ignored.
 - Legacy cache rows with malformed/unparseable dates are now dropped at read time; affected rows may need cache refresh if large.
 
 ## Run / Validate
@@ -147,7 +151,7 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-09T09:26:37+00:00
+- Last update UTC: 2026-04-09T10:12:53+00:00
 - Latest experiment artifact: `experiments/runs/run_20260408T131249Z.json`
 - Champion scenarios tracked: 1
 - Latest run summary:

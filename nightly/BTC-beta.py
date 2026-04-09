@@ -52,6 +52,8 @@ CHAMPION_REGISTRY_PATH = Path("experiments") / "registry" / "champions.json"
 GROK_OUTPUT_DIR = Path("experiments") / "grok"
 LIVE_SNAPSHOT_DIR = Path("experiments") / "live_snapshots"
 LATEST_LIVE_SNAPSHOT_PATH = LIVE_SNAPSHOT_DIR / "latest_live_dashboard.txt"
+BACKTEST_SNAPSHOT_DIR = Path("experiments") / "backtest_snapshots"
+LATEST_BACKTEST_SNAPSHOT_PATH = BACKTEST_SNAPSHOT_DIR / "latest_backtest.txt"
 
 TIMEFRAME_MENU = {
     "1": ("1d", "1d"),
@@ -2027,6 +2029,82 @@ def load_latest_live_dashboard_snapshot() -> Optional[str]:
         return None
 
 
+def compose_backtest_snapshot_text(
+    result: Dict[str, object],
+    trades: List[Dict[str, object]],
+    metrics: Dict[str, object],
+    cfg: BacktestConfig,
+    timeframe: str,
+    is_crypto: bool,
+    backtest_months: int,
+    loaded_assets: int,
+    holdout_result: Optional[Dict[str, object]] = None,
+) -> str:
+    lines: List[str] = []
+    lines.append(f"Snapshot Time: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"Market: {'Crypto' if is_crypto else 'Traditional'}")
+    lines.append(f"Timeframe: {timeframe}")
+    lines.append(f"Backtest Lookback Months: {backtest_months}")
+    lines.append(f"Loaded Assets: {loaded_assets}")
+    lines.append("")
+    lines.append("=" * 170)
+    lines.append("BACKTEST SUMMARY")
+    lines.append("=" * 170)
+    lines.append(f"Final Value   : ${float(result.get('final', 0.0)):,.2f}")
+    lines.append(f"Total Return  : {float(result.get('return_pct', 0.0)):+.2f}%")
+    lines.append(f"Trades closed : {len(trades)}")
+    lines.append(f"Max Drawdown  : {float(metrics.get('max_drawdown_pct', 0.0)):.2f}%")
+    lines.append(f"Sharpe/Sortino: {float(metrics.get('sharpe', 0.0)):.2f} / {float(metrics.get('sortino', 0.0)):.2f}")
+    lines.append(f"Turnover/Year : {float(metrics.get('turnover_per_year', 0.0)):.2f} trades")
+    lines.append(f"Avg Hold Days : {float(metrics.get('avg_hold_days', 0.0)):.2f}")
+    lines.append(f"Fee/Slippage  : {cfg.fee_pct}% / {cfg.slippage_pct}% per leg")
+    lines.append(f"Position size : {cfg.tuned.position_size*100:.1f}%")
+    lines.append("")
+    lines.append("=" * 170)
+    lines.append("TRADE HISTORY")
+    lines.append("=" * 170)
+    if trades:
+        tr_df = pd.DataFrame(trades)
+        lines.append(tr_df.to_string(index=False))
+    else:
+        lines.append("No closed trades.")
+
+    contrib = metrics.get("asset_contrib", {})
+    if isinstance(contrib, dict) and contrib:
+        lines.append("")
+        lines.append("Top Asset Contribution:")
+        for asset, pnl in list(contrib.items())[:5]:
+            lines.append(f"  {asset:<8} ${float(pnl):,.2f}")
+
+    if holdout_result is not None:
+        hm = holdout_result.get("metrics", {}) if isinstance(holdout_result, dict) else {}
+        lines.append("")
+        lines.append(
+            f"Holdout (out-of-sample) Return: {float(holdout_result.get('return_pct', 0.0)):+.2f}%  |  "
+            f"MaxDD: {float(hm.get('max_drawdown_pct', 0.0)):.2f}%  |  Sharpe: {float(hm.get('sharpe', 0.0)):.2f}"
+        )
+    return "\n".join(lines).strip() + "\n"
+
+
+def save_backtest_snapshot(snapshot_text: str) -> Path:
+    BACKTEST_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = pd.Timestamp.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    ts_path = BACKTEST_SNAPSHOT_DIR / f"backtest_{stamp}.txt"
+    ts_path.write_text(snapshot_text, encoding="utf-8")
+    LATEST_BACKTEST_SNAPSHOT_PATH.write_text(snapshot_text, encoding="utf-8")
+    return ts_path
+
+
+def load_latest_backtest_snapshot() -> Optional[str]:
+    if not LATEST_BACKTEST_SNAPSHOT_PATH.exists():
+        return None
+    try:
+        txt = LATEST_BACKTEST_SNAPSHOT_PATH.read_text(encoding="utf-8").strip()
+        return txt if txt else None
+    except Exception:
+        return None
+
+
 def build_grok_prompt(dashboard_text: str, datetime_context: str) -> str:
     return GROK_ANALYSIS_INSTRUCTION.format(
         datetime_context=datetime_context,
@@ -2106,21 +2184,30 @@ def call_xai_grok(prompt: str) -> Optional[str]:
 def run_grok_analysis_mode() -> None:
     now_local = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
     dt_ctx = input(f"Date/time context for prompt (default {now_local}): ").strip() or now_local
-    latest_exists = LATEST_LIVE_SNAPSHOT_PATH.exists()
-    if latest_exists:
-        print("Dashboard source:")
-        print("1. Paste dashboard text")
+    live_exists = LATEST_LIVE_SNAPSHOT_PATH.exists()
+    backtest_exists = LATEST_BACKTEST_SNAPSHOT_PATH.exists()
+    print("Dashboard source:")
+    print("1. Paste dashboard text")
+    if live_exists:
         print("2. Use latest saved Live Dashboard snapshot")
-        src = (input("Enter 1 or 2 (default 2): ").strip() or "2")
-    else:
-        src = "1"
+    if backtest_exists:
+        print("3. Use latest saved Backtest snapshot")
+    default_src = "3" if backtest_exists else ("2" if live_exists else "1")
+    src = (input(f"Enter source (default {default_src}): ").strip() or default_src)
 
-    if src == "2":
+    if src == "2" and live_exists:
         dashboard_text = load_latest_live_dashboard_snapshot() or ""
         if dashboard_text:
             print(f"Loaded latest snapshot: {LATEST_LIVE_SNAPSHOT_PATH}")
         else:
-            print("No latest snapshot content found. Please paste dashboard text instead.")
+            print("No latest live snapshot content found. Please paste dashboard text instead.")
+            dashboard_text = read_multiline_input_until_end()
+    elif src == "3" and backtest_exists:
+        dashboard_text = load_latest_backtest_snapshot() or ""
+        if dashboard_text:
+            print(f"Loaded latest snapshot: {LATEST_BACKTEST_SNAPSHOT_PATH}")
+        else:
+            print("No latest backtest snapshot content found. Please paste dashboard text instead.")
             dashboard_text = read_multiline_input_until_end()
     else:
         dashboard_text = read_multiline_input_until_end()
@@ -2470,6 +2557,20 @@ def main() -> None:
                     f"Holdout (out-of-sample) Return: {holdout_result.get('return_pct', 0.0):+.2f}%  |  "
                     f"MaxDD: {hm.get('max_drawdown_pct', 0.0):.2f}%  |  Sharpe: {hm.get('sharpe', 0.0):.2f}"
                 )
+
+            bt_snapshot = compose_backtest_snapshot_text(
+                result=result,
+                trades=trades,
+                metrics=metrics,
+                cfg=cfg,
+                timeframe=timeframe,
+                is_crypto=is_crypto,
+                backtest_months=backtest_months if backtest_months is not None else 12,
+                loaded_assets=len(raw_data),
+                holdout_result=holdout_result,
+            )
+            bt_snap_path = save_backtest_snapshot(bt_snapshot)
+            print(f"Saved latest Backtest snapshot: {bt_snap_path}")
 
         input("\nPress Enter to return to main menu...")
 
