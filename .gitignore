@@ -1,7 +1,9 @@
-crypto_data.db
-crypto_data.db
-experiments/runs/
-experiments/reports/
-experiments/candidates.jsonl
-experiments/live_snapshots/
-experiments/grok/
+# Generated local databases
+**/crypto_data.db
+
+# Generated experiment/test artifacts (root and nested workdirs)
+**/experiments/runs/
+**/experiments/reports/
+**/experiments/candidates.jsonl
+**/experiments/live_snapshots/
+**/experiments/grok/
