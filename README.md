@@ -56,6 +56,8 @@ python nightly/BTC-beta.py
 
 - User-selectable analysis interval: `1d`, `4h`, `8h`, `12h`
 - Backtest lookback selector: `1/3/6/12/18/24 months`
+- Traditional market top-list selector expanded to `Top 10/20/50/100` (region-based curated universes)
+- Crypto quote currency selector: `USD / USDT / BTC / ETH / BNB`
 - Accurate period math using `365.25` days/year
 - Dynamic Fibonacci swing detection with support/resistance guards
 - ATR/ADX/OBV/CMF risk-scoring integration
@@ -78,6 +80,9 @@ python nightly/BTC-beta.py
   - Optuna trial parallel jobs
 - CUDA detection via CuPy with safe CPU fallback
 - Binance symbol pre-filtering using `exchangeInfo` to reduce bad ticker noise
+- Crypto fetch behavior by quote:
+  - all quotes use Binance first
+  - yfinance fallback is used for `-USD` pairs; non-USD quotes remain Binance-first only
 - Backtest churn controls:
   - `min_hold_bars` before signal exits
   - `cooldown_bars` after exits

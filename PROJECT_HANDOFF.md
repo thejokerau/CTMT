@@ -114,6 +114,13 @@
 - Added Ollama recovery flow:
   - attempts `ollama serve` startup when local endpoint is unreachable
   - attempts model auto-pull on missing-model errors (configurable via `OLLAMA_AUTO_PULL`)
+- Expanded Traditional asset selection scale:
+  - regional curated universes enlarged beyond top-10
+  - top-list selection now supports `Top 10 / Top 20 / Top 50 / Top 100` (when available)
+- Added crypto quote-currency selection:
+  - user can select `USD / USDT / BTC / ETH / BNB`
+  - pair selection propagates through coin selection, Binance symbol mapping, and display labels
+  - yfinance fallback remains enabled for `-USD` pairs; non-USD quotes use Binance-first flow
 - Expanded git noise suppression for generated artifacts:
   - added ignore rules for Python bytecode/cache (`__pycache__`, `*.pyc`)
   - untracked previously committed cache files from index
@@ -174,7 +181,7 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-09T11:09:56+00:00
+- Last update UTC: 2026-04-09T13:21:31+00:00
 - Latest experiment artifact: `experiments/runs/run_20260408T131249Z.json`
 - Champion scenarios tracked: 1
 - Latest run summary:

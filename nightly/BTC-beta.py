@@ -67,17 +67,49 @@ TIMEFRAME_MENU = {
     "4": ("12h", "12h"),
 }
 
-TRADITIONAL_TOP = {
-    "1": ["^AXJO", "BHP.AX", "CBA.AX", "RIO.AX", "CSL.AX", "WBC.AX", "NAB.AX", "MQG.AX", "FMG.AX", "WES.AX"],
-    "2": ["^GSPC", "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "BRK-B", "TSLA", "JPM"],
-    "3": ["^FTSE", "HSBA.L", "AZN.L", "SHEL.L", "ULVR.L", "BP.L", "GSK.L", "RIO.L", "BHP.L", "VOD.L"],
-    "4": ["^STOXX50E", "MC.PA", "ASML.AS", "SAP.DE", "AIR.PA", "SIE.DE", "SU.PA", "RMS.PA", "TTE.PA", "ALV.DE"],
-    "5": ["^GSPTSE", "RY.TO", "TD.TO", "ENB.TO", "CNR.TO", "BN.TO", "BCE.TO", "SHOP.TO", "CP.TO", "CNQ.TO"],
+CRYPTO_QUOTE_MENU = {
+    "1": "USD",
+    "2": "USDT",
+    "3": "BTC",
+    "4": "ETH",
+    "5": "BNB",
 }
 
-MAJOR_CRYPTO = [
-    "BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD", "XRP-USD",
-    "DOGE-USD", "TON-USD", "ADA-USD", "TRX-USD", "AVAX-USD",
+TRADITIONAL_TOP = {
+    "1": [  # Australia
+        "^AXJO", "BHP.AX", "CBA.AX", "RIO.AX", "CSL.AX", "WBC.AX", "NAB.AX", "MQG.AX", "FMG.AX", "WES.AX",
+        "ANZ.AX", "TLS.AX", "WOW.AX", "GMG.AX", "TCL.AX", "QBE.AX", "SUN.AX", "STO.AX", "MIN.AX", "COL.AX",
+        "APA.AX", "ALL.AX", "S32.AX", "WDS.AX", "ORG.AX", "IAG.AX", "JHX.AX", "RMD.AX", "ASX.AX", "REA.AX",
+        "BXB.AX", "DMP.AX", "COH.AX", "XRO.AX", "A2M.AX", "ALU.AX", "BSL.AX", "GPT.AX", "MPL.AX", "AMP.AX",
+    ],
+    "2": [  # United States
+        "^GSPC", "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "BRK-B", "TSLA", "JPM",
+        "V", "MA", "UNH", "XOM", "LLY", "AVGO", "JNJ", "PG", "HD", "COST",
+        "ABBV", "MRK", "PEP", "BAC", "KO", "ADBE", "NFLX", "CRM", "ORCL", "AMD",
+        "CSCO", "TMO", "CVX", "WMT", "ACN", "DIS", "ABT", "MCD", "PFE", "INTC",
+        "QCOM", "TXN", "AMAT", "CMCSA", "DHR", "NKE", "LIN", "UNP", "PM", "NEE",
+        "LOW", "RTX", "SPGI", "MS", "GS", "BLK", "CAT", "GE", "IBM", "MU",
+    ],
+    "3": [  # United Kingdom
+        "^FTSE", "HSBA.L", "AZN.L", "SHEL.L", "ULVR.L", "BP.L", "GSK.L", "RIO.L", "BHP.L", "VOD.L",
+        "LSEG.L", "DGE.L", "GLEN.L", "NG.L", "REL.L", "BT-A.L", "BARC.L", "STAN.L", "PRU.L", "MNG.L",
+        "LLOY.L", "NWG.L", "CPG.L", "AV.L", "AAL.L", "INF.L", "MKS.L", "SMIN.L", "SSE.L", "RR.L",
+    ],
+    "4": [  # Europe
+        "^STOXX50E", "MC.PA", "ASML.AS", "SAP.DE", "AIR.PA", "SIE.DE", "SU.PA", "RMS.PA", "TTE.PA", "ALV.DE",
+        "OR.PA", "BN.PA", "SAN.PA", "BNP.PA", "CS.PA", "ADS.DE", "BAS.DE", "BAYN.DE", "ENI.MI", "ISP.MI",
+        "IFX.DE", "IBE.MC", "ITX.MC", "NOKIA.HE", "NOVN.SW", "ROG.SW", "NESN.SW", "SU.PA", "VOW3.DE", "MBG.DE",
+    ],
+    "5": [  # Canada
+        "^GSPTSE", "RY.TO", "TD.TO", "ENB.TO", "CNR.TO", "BN.TO", "BCE.TO", "SHOP.TO", "CP.TO", "CNQ.TO",
+        "BNS.TO", "CM.TO", "BMO.TO", "TRP.TO", "SU.TO", "MFC.TO", "NA.TO", "SLF.TO", "T.TO", "ATD.TO",
+        "WCN.TO", "GIB-A.TO", "FTS.TO", "POW.TO", "CAR-UN.TO", "CSU.TO", "TOU.TO", "TRI.TO", "ABX.TO", "TECK-B.TO",
+    ],
+}
+
+MAJOR_CRYPTO_BASES = [
+    "BTC", "ETH", "BNB", "SOL", "XRP",
+    "DOGE", "TON", "ADA", "TRX", "AVAX",
 ]
 
 
@@ -382,8 +414,23 @@ def save_to_cache(ticker: str, timeframe: str, df: pd.DataFrame) -> None:
     conn.commit()
 
 
+def split_crypto_ticker(ticker: str) -> Tuple[str, str]:
+    t = str(ticker).strip().upper()
+    if "-" in t:
+        base, quote = t.split("-", 1)
+        return base, quote
+    return t, "USD"
+
+
+def make_crypto_ticker(base: str, quote: str) -> str:
+    return f"{base.upper()}-{quote.upper()}"
+
+
 def binance_symbol_from_ticker(ticker: str) -> str:
-    return ticker.replace("-USD", "USDT") if "-USD" in ticker else f"{ticker}USDT"
+    base, quote = split_crypto_ticker(ticker)
+    # Binance commonly maps USD-style tracking to USDT spot pairs.
+    bquote = "USDT" if quote == "USD" else quote
+    return f"{base}{bquote}"
 
 
 def get_binance_spot_symbols() -> set:
@@ -546,7 +593,9 @@ def fetch_with_cache(ticker: str, timeframe: str, is_crypto: bool, years: float 
         if live is not None:
             print(f"   Binance loaded: {ticker}")
 
-    if live is None:
+    # yfinance crypto support is reliable primarily for USD pairs.
+    crypto_can_use_yf = (not is_crypto) or split_crypto_ticker(ticker)[1] == "USD"
+    if live is None and crypto_can_use_yf:
         live = fetch_from_yfinance(ticker, timeframe, years=years)
         if live is not None:
             print(f"   yfinance loaded: {ticker}")
@@ -567,8 +616,9 @@ def fetch_with_cache(ticker: str, timeframe: str, is_crypto: bool, years: float 
     return merged
 
 
-def fetch_top_coins(n: int) -> List[str]:
+def fetch_top_coins(n: int, quote_currency: str = "USD") -> List[str]:
     print(f"Fetching top {n} coins...")
+    quote = quote_currency.upper().strip() or "USD"
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/coins/markets",
@@ -586,13 +636,14 @@ def fetch_top_coins(n: int) -> List[str]:
             clean_sym = re.sub(r"[^A-Z0-9]", "", raw_sym)
             if not clean_sym:
                 continue
-            tickers.append(f"{clean_sym}-USD")
+            tickers.append(make_crypto_ticker(clean_sym, quote))
     except Exception as e:
         print(f"   WARNING CoinGecko failed: {e}")
         tickers = []
 
     final = tickers[:n]
-    for t in MAJOR_CRYPTO:
+    for b in MAJOR_CRYPTO_BASES:
+        t = make_crypto_ticker(b, quote)
         if len(final) >= n:
             break
         if t not in final:
@@ -886,6 +937,12 @@ def score_to_rec(score: int, tuned: TunedParams) -> str:
     return "HOLD"
 
 
+def pretty_asset_label(ticker: str, is_crypto: bool) -> str:
+    if is_crypto:
+        return split_crypto_ticker(ticker)[0]
+    return ticker
+
+
 def action_emoji(rec: str) -> str:
     if rec in ["BUY", "STRONG BUY"]:
         base = "BUY"
@@ -1035,7 +1092,7 @@ def build_live_tables(enriched: Dict[str, pd.DataFrame], is_crypto: bool, tuned:
         rows.append(
             {
                 "_Ticker": ticker,
-                "Asset": ticker.replace("-USD", "") if is_crypto else ticker,
+                "Asset": pretty_asset_label(ticker, is_crypto),
                 "Action": action_emoji(rec),
                 "Score": f"{adj_score}/5",
                 "Raw Score": f"{score}/5",
@@ -1064,7 +1121,7 @@ def build_live_tables(enriched: Dict[str, pd.DataFrame], is_crypto: bool, tuned:
 
         risk_rows.append(
             {
-                "Asset": ticker.replace("-USD", "") if is_crypto else ticker,
+                "Asset": pretty_asset_label(ticker, is_crypto),
                 "Total Score": f"{score}/5",
                 "ATR Volatility": f"{comp['ATR Volatility']:.2f}%",
                 "ADX Trend Strength": f"{comp['ADX Trend Strength']:.2f}",
@@ -1378,7 +1435,7 @@ def simulate_backtest(
                 {
                     "_Ticker": t,
                     "_PriceRaw": float(latest["Close"]),
-                    "Asset": t.replace("-USD", "") if is_crypto else t,
+                    "Asset": pretty_asset_label(t, is_crypto),
                     "Recommendation": rec,
                     "Score": s,
                 }
@@ -1731,13 +1788,27 @@ def choose_timeframe() -> str:
     return TIMEFRAME_MENU.get(t, TIMEFRAME_MENU["1"])[0]
 
 
-def load_assets(is_crypto: bool) -> List[str]:
+def choose_crypto_quote_currency() -> str:
+    print("Select quote currency for crypto pairs:")
+    print("1. USD  2. USDT  3. BTC  4. ETH  5. BNB")
+    ch = input("Enter 1-5 (default 1): ").strip() or "1"
+    return CRYPTO_QUOTE_MENU.get(ch, "USD")
+
+
+def choose_traditional_top_n() -> int:
+    print("Number of top traditional assets:")
+    print("1. Top 10   2. Top 20   3. Top 50   4. Top 100")
+    ch = input("Enter 1-4 (default 2): ").strip() or "2"
+    return {"1": 10, "2": 20, "3": 50, "4": 100}.get(ch, 20)
+
+
+def load_assets(is_crypto: bool, quote_currency: str = "USD") -> List[str]:
     if is_crypto:
         print("Number of top coins:")
         print("1. Top 10   2. Top 20   3. Top 50   4. Top 100")
         n_choice = input("Enter 1-4: ").strip()
         n = {"1": 10, "2": 20, "3": 50, "4": 100}.get(n_choice, 20)
-        return filter_crypto_tickers_by_binance(fetch_top_coins(n))
+        return filter_crypto_tickers_by_binance(fetch_top_coins(n, quote_currency=quote_currency))
 
     print("Select Country/Region:")
     print("1. Australia  2. United States  3. United Kingdom  4. Europe  5. Canada  6. Other")
@@ -1750,7 +1821,9 @@ def load_assets(is_crypto: bool) -> List[str]:
 
     tickers: List[str] = []
     if mode in ["1", "3"]:
-        tickers.extend(TRADITIONAL_TOP.get(country, TRADITIONAL_TOP["2"]))
+        top_n = choose_traditional_top_n()
+        universe = TRADITIONAL_TOP.get(country, TRADITIONAL_TOP["2"])
+        tickers.extend(universe[:top_n])
     if mode in ["2", "3"]:
         manual = input("Enter manual tickers (comma-separated): ").strip().upper()
         if manual:
@@ -2915,6 +2988,7 @@ def main() -> None:
             continue
 
         is_crypto = main_choice == "1"
+        quote_currency = choose_crypto_quote_currency() if is_crypto else "USD"
         timeframe = choose_timeframe()
 
         print("Select mode:")
@@ -2924,7 +2998,7 @@ def main() -> None:
         is_backtest = mode == "2"
         backtest_months = prompt_backtest_months() if is_backtest else None
 
-        tickers = load_assets(is_crypto)
+        tickers = load_assets(is_crypto, quote_currency=quote_currency)
         if not tickers:
             print("No assets selected.")
             continue
@@ -3005,7 +3079,7 @@ def main() -> None:
             print(f"Saved latest Live Dashboard snapshot: {snap_path}")
 
             top_ticker = table.iloc[0]["_Ticker"]
-            chart_top_asset(enriched[top_ticker], top_ticker.replace("-USD", "") if is_crypto else top_ticker)
+            chart_top_asset(enriched[top_ticker], pretty_asset_label(top_ticker, is_crypto) if is_crypto else top_ticker)
 
         else:
             cfg = prompt_backtest_config(timeframe)
