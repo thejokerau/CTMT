@@ -96,6 +96,8 @@ python nightly/BTC-beta.py
   - xAI, OpenAI, Anthropic, Ollama, OpenAI-compatible, OpenClaw
   - in-app profile management and active-profile switching
   - secure user-local preference/key storage outside repo
+  - per-profile internet mode toggle (online-aware vs offline-aware prompting)
+  - per-profile model update (e.g., set Ollama profile to DeepSeek)
 
 ## Notes
 
@@ -206,3 +208,14 @@ In `AI Provider Settings`, use quick-start presets for:
 - Ollama Local
 - OpenClaw Local (OpenAI-compatible)
 - OpenAI-compatible Custom
+
+Offline prompt behavior:
+
+- Profiles marked `offline-aware` use an offline-safe system prompt (explicitly no live internet/news assumptions).
+- Profiles marked `online-aware` use the existing online Grok-style system prompt.
+
+Ollama behavior:
+
+- Nightly will try to call local Ollama directly.
+- If unreachable, it attempts to start `ollama serve` automatically.
+- If model is missing, it attempts auto-pull (`OLLAMA_AUTO_PULL=1` by default).

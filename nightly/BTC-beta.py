@@ -4,6 +4,7 @@ import re
 import os
 import json
 import getpass
+import subprocess
 import sqlite3
 import warnings
 import importlib.util
@@ -162,6 +163,21 @@ OUTPUT FORMAT — strictly follow this structure with clean headings and bullet 
 Now analyze this dashboard:
 {dashboard_text}
 """
+
+ONLINE_SYSTEM_PROMPT = "You are Grok, built by xAI."
+
+OFFLINE_SYSTEM_PROMPT = """You are a highly skilled quantitative crypto analyst with a direct, no-nonsense, and insightful style inspired by Grok from xAI.
+You are pragmatic, clear, and focused on delivering maximum actionable value from the data provided.
+You avoid corporate fluff, hedging language, and unnecessary politeness.
+You are honest about limitations (especially that you have no real-time internet access or live market data).
+
+When analyzing trading dashboards:
+- Be concise but insightful.
+- Prioritize numbers and logical interpretation.
+- Use clear structure with headings and bullets.
+- Flag what looks strong vs weak without exaggeration.
+
+You are now analyzing crypto trading dashboard data. Think step-by-step and follow the analysis instructions precisely."""
 
 
 def _enable_windows_vt_mode() -> bool:
@@ -2081,6 +2097,13 @@ def provider_default_envvar(provider: str) -> str:
     return ""
 
 
+def provider_default_internet_access(provider: str) -> bool:
+    p = provider.lower().strip()
+    if p in ("xai", "openai", "anthropic"):
+        return True
+    return False
+
+
 def provider_needs_api_key(provider: str) -> bool:
     return provider.lower().strip() in ("xai", "openai", "anthropic")
 
@@ -2189,6 +2212,40 @@ def call_ollama_chat(endpoint: str, model: str, prompt: str, system_prompt: str,
         return None, -1, str(e)
 
 
+def try_start_ollama_server() -> bool:
+    """
+    Best-effort local Ollama startup for users who haven't started it yet.
+    """
+    try:
+        kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if os.name == "nt":
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            subprocess.Popen(["ollama", "serve"], creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, **kwargs)
+        else:
+            subprocess.Popen(["ollama", "serve"], start_new_session=True, **kwargs)
+        time.sleep(2.0)
+        return True
+    except Exception:
+        return False
+
+
+def pull_ollama_model_if_needed(endpoint: str, model: str) -> bool:
+    """
+    Best-effort model pull when Ollama reports missing model.
+    """
+    base = endpoint
+    if "/api/chat" in base:
+        base = base.split("/api/chat")[0]
+    pull_url = base.rstrip("/") + "/api/pull"
+    payload = {"name": model, "stream": False}
+    try:
+        r = requests.post(pull_url, json=payload, timeout=900)
+        return 200 <= r.status_code < 300
+    except Exception:
+        return False
+
+
 def call_active_ai_provider(prompt: str, system_prompt: str = "You are Grok, built by xAI.") -> Optional[str]:
     prefs = load_ai_preferences()
     secrets = load_ai_secrets()
@@ -2245,6 +2302,23 @@ def call_active_ai_provider(prompt: str, system_prompt: str = "You are Grok, bui
         text, status, err_body = call_ollama_chat(endpoint, model, prompt, system_prompt, temperature)
         if text:
             return text
+        # Try to recover when daemon/model is unavailable.
+        if status == -1:
+            print("Ollama server appears unreachable. Attempting to start `ollama serve`...")
+            if try_start_ollama_server():
+                text2, status2, err_body2 = call_ollama_chat(endpoint, model, prompt, system_prompt, temperature)
+                if text2:
+                    return text2
+                status, err_body = status2, err_body2
+        if status in (400, 404) and "model" in (err_body or "").lower() and "not found" in (err_body or "").lower():
+            auto_pull = (os.getenv("OLLAMA_AUTO_PULL", "1").strip().lower() not in {"0", "false", "no", "n"})
+            if auto_pull:
+                print(f"Ollama model `{model}` not found. Attempting auto-pull...")
+                if pull_ollama_model_if_needed(endpoint, model):
+                    text3, status3, err_body3 = call_ollama_chat(endpoint, model, prompt, system_prompt, temperature)
+                    if text3:
+                        return text3
+                    status, err_body = status3, err_body3
         print(f"Ollama call failed. Status: {status}")
         if err_body:
             print("Error body (truncated):")
@@ -2269,7 +2343,9 @@ def print_ai_profiles(prefs: Dict[str, object]) -> None:
         provider = str(p.get("provider", ""))
         model = str(p.get("model", ""))
         endpoint = str(p.get("endpoint", ""))
-        print(f"{mark} [{idx}] {name}  |  {provider}  |  {model}")
+        internet_access = bool(p.get("internet_access", provider_default_internet_access(provider)))
+        net_tag = "online" if internet_access else "offline"
+        print(f"{mark} [{idx}] {name}  |  {provider}  |  {model}  |  {net_tag}")
         print(f"      endpoint: {endpoint}")
 
 
@@ -2341,6 +2417,7 @@ def configure_ai_profile(prefs: Dict[str, object], secrets: Dict[str, str]) -> T
         "api_key_env": api_key_env,
         "api_key_name": api_key_name,
         "temperature": temperature,
+        "internet_access": provider_default_internet_access(provider),
     }
     prefs["profiles"] = profiles
     if not str(prefs.get("active_profile", "")).strip():
@@ -2407,6 +2484,7 @@ def add_preset_profile(prefs: Dict[str, object], secrets: Dict[str, str]) -> Tup
         "api_key_env": api_key_env,
         "api_key_name": profile_name,
         "temperature": 0.2,
+        "internet_access": provider_default_internet_access(provider),
     }
     prefs["profiles"] = profiles
 
@@ -2435,6 +2513,7 @@ def run_ai_provider_settings_menu() -> None:
         key_val, key_source = resolve_profile_api_key(active_profile, secrets)
         provider = str(active_profile.get("provider", "")).strip()
         model = str(active_profile.get("model", "")).strip()
+        internet_access = bool(active_profile.get("internet_access", provider_default_internet_access(provider)))
         key_status = "configured" if key_val else "missing"
         if key_source.startswith("env:"):
             key_hint = f"from environment variable ({key_source.split(':', 1)[1]})"
@@ -2446,6 +2525,7 @@ def run_ai_provider_settings_menu() -> None:
             f"Current profile: {active_name}\n"
             f"Provider: {provider}\n"
             f"Model: {model}\n"
+            f"Internet mode: {'online-aware' if internet_access else 'offline-aware'}\n"
             f"API key: {key_status} ({key_hint})"
         )
         print("1. View profiles")
@@ -2456,15 +2536,17 @@ def run_ai_provider_settings_menu() -> None:
         print("6. Set or replace profile API key")
         print("7. Remove profile API key")
         print("8. Test active profile connection")
-        print("9. Back")
+        print("9. Set model for a profile")
+        print("10. Toggle internet-access flag for a profile")
+        print("11. Back")
 
-        ch = (input("Enter 1-9: ").strip() or "9")
+        ch = (input("Enter 1-11: ").strip() or "11")
         profiles = prefs.get("profiles", {}) if isinstance(prefs, dict) else {}
         if not isinstance(profiles, dict):
             profiles = {}
             prefs["profiles"] = profiles
 
-        if ch == "9":
+        if ch == "11":
             save_ai_preferences(prefs)
             save_ai_secrets(secrets)
             return
@@ -2532,6 +2614,28 @@ def run_ai_provider_settings_menu() -> None:
                 print(f"AI test response: {resp[:200]}")
             else:
                 print("AI test call failed.")
+            continue
+        if ch == "9":
+            name = choose_profile_name(prefs, "Enter profile number or name to set model: ")
+            if not name or name not in profiles or not isinstance(profiles[name], dict):
+                continue
+            current_model = str(profiles[name].get("model", "")).strip()
+            new_model = input(f"Model for `{name}` (current `{current_model}`): ").strip()
+            if not new_model:
+                print("No change made.")
+                continue
+            profiles[name]["model"] = new_model
+            save_ai_preferences(prefs)
+            print(f"Updated model for `{name}` to `{new_model}`.")
+            continue
+        if ch == "10":
+            name = choose_profile_name(prefs, "Enter profile number or name to toggle internet-access flag: ")
+            if not name or name not in profiles or not isinstance(profiles[name], dict):
+                continue
+            cur = bool(profiles[name].get("internet_access", provider_default_internet_access(str(profiles[name].get("provider", "")))))
+            profiles[name]["internet_access"] = (not cur)
+            save_ai_preferences(prefs)
+            print(f"Profile `{name}` internet_access set to {profiles[name]['internet_access']}.")
             continue
         print("Invalid choice.")
 
@@ -2739,7 +2843,13 @@ def run_ai_analysis_mode() -> None:
         print("\n(Full prompt saved to file above.)")
         return
 
-    response = call_active_ai_provider(prompt, system_prompt="You are Grok, built by xAI.")
+    ai_prefs = load_ai_preferences()
+    active_name, active_profile = get_active_ai_profile(ai_prefs)
+    internet_access = bool(active_profile.get("internet_access", provider_default_internet_access(str(active_profile.get("provider", "")))))
+    system_prompt = ONLINE_SYSTEM_PROMPT if internet_access else OFFLINE_SYSTEM_PROMPT
+    print(f"AI Analysis system prompt mode: {'online-aware' if internet_access else 'offline-aware'} (profile `{active_name}`).")
+
+    response = call_active_ai_provider(prompt, system_prompt=system_prompt)
     if not response:
         print("No AI response returned.")
         return
@@ -2765,9 +2875,12 @@ def main() -> None:
     ai_secrets = load_ai_secrets()
     active_name, active_profile = get_active_ai_profile(ai_prefs)
     active_key, active_key_src = resolve_profile_api_key(active_profile, ai_secrets)
+    active_provider = str(active_profile.get("provider", "")).strip()
+    active_internet = bool(active_profile.get("internet_access", provider_default_internet_access(active_provider)))
     print(
-        f"AI provider active: profile={active_name}, provider={active_profile.get('provider', '')}, "
-        f"model={active_profile.get('model', '')}, key={'set' if active_key else 'missing'} ({active_key_src})"
+        f"AI provider active: profile={active_name}, provider={active_provider}, "
+        f"model={active_profile.get('model', '')}, mode={'online-aware' if active_internet else 'offline-aware'}, "
+        f"key={'set' if active_key else 'missing'} ({active_key_src})"
     )
 
     while True:
