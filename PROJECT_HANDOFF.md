@@ -184,6 +184,7 @@
   - Task Monitor tab adds queue operations: pause/resume, remove queued task, and move queued task priority up/down
   - running tasks are viewable; hard-stop for active running tasks is still not implemented
   - fixed Task Monitor staleness by adding periodic (~1s) tab refresh and state-change refresh hooks
+  - added terminal-style live log pane at Task Monitor bottom for start/done events and captured backend logs (useful for progress visibility/debugging)
 
 ## Current Files of Interest
 - `nightly/BTC-beta.py`
@@ -245,13 +246,13 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-10T02:54:26+00:00
-- Latest experiment artifact: `experiments/runs/run_20260410T025256Z.json`
+- Last update UTC: 2026-04-10T03:00:00+00:00
+- Latest experiment artifact: `experiments/runs/run_20260410T025556Z.json`
 - Champion scenarios tracked: 4
 - Latest run summary:
-- `crypto_1d_12m_top20`: selected `tuned`, return +41.71%, maxDD 41.82%, sharpe 0.95
-- `crypto_8h_12m_top20`: selected `tuned`, return +70.82%, maxDD 34.54%, sharpe 1.13
-- `crypto_8h_24m_top10`: selected `baseline`, return +60.37%, maxDD 31.51%, sharpe 0.94
-- `crypto_12h_24m_top10`: selected `tuned`, return +103.42%, maxDD 34.81%, sharpe 1.07
+- `crypto_1d_12m_top20`: selected `tuned`, return +34.93%, maxDD 31.43%, sharpe 0.82
+- `crypto_8h_12m_top20`: selected `tuned`, return +93.39%, maxDD 34.40%, sharpe 1.25
+- `crypto_8h_24m_top10`: selected `tuned`, return +76.07%, maxDD 34.19%, sharpe 0.92
+- `crypto_12h_24m_top10`: selected `baseline`, return +39.31%, maxDD 32.43%, sharpe 0.81
 <!-- AUTO_HANDBACK_END -->
 

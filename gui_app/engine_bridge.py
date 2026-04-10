@@ -43,7 +43,9 @@ class EngineBridge:
         with self._lock:
             stream = io.StringIO()
             with redirect_stdout(stream), redirect_stderr(stream):
-                return self._run_live_panel_impl(cfg)
+                out = self._run_live_panel_impl(cfg)
+            out["log"] = stream.getvalue()
+            return out
 
     def _run_live_panel_impl(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         is_crypto = str(cfg.get("market", "crypto")).lower() == "crypto"
@@ -91,7 +93,9 @@ class EngineBridge:
         with self._lock:
             stream = io.StringIO()
             with redirect_stdout(stream), redirect_stderr(stream):
-                return self._run_backtest_impl(cfg)
+                out = self._run_backtest_impl(cfg)
+            out["log"] = stream.getvalue()
+            return out
 
     def _run_backtest_impl(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         is_crypto = str(cfg.get("market", "crypto")).lower() == "crypto"
@@ -388,18 +392,21 @@ class EngineBridge:
         system_prompt_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         with self._lock:
-            prompt = prompt_override if (prompt_override and str(prompt_override).strip()) else self.mod.build_grok_prompt(dashboard_text, datetime_context)
-            system_prompt = (
-                system_prompt_override
-                if (system_prompt_override and str(system_prompt_override).strip())
-                else self._default_system_prompt_for_active_profile()
-            )
-            response = self.mod.call_active_ai_provider(prompt, system_prompt=system_prompt)
+            stream = io.StringIO()
+            with redirect_stdout(stream), redirect_stderr(stream):
+                prompt = prompt_override if (prompt_override and str(prompt_override).strip()) else self.mod.build_grok_prompt(dashboard_text, datetime_context)
+                system_prompt = (
+                    system_prompt_override
+                    if (system_prompt_override and str(system_prompt_override).strip())
+                    else self._default_system_prompt_for_active_profile()
+                )
+                response = self.mod.call_active_ai_provider(prompt, system_prompt=system_prompt)
             return {
                 "ok": bool(response),
                 "prompt": prompt,
                 "response": response or "",
                 "system_prompt": system_prompt,
+                "log": stream.getvalue(),
             }
 
     def run_standard_research(self) -> Dict[str, Any]:

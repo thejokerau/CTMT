@@ -90,6 +90,7 @@ GUI task execution:
   - pause/resume queue
   - remove queued task
   - queued task reprioritization (move up/down)
+  - terminal-style live log pane for task start/completion and captured backend output
 
 GUI AI configuration:
 

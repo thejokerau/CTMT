@@ -383,8 +383,18 @@ class CTMTGuiApp:
         self.queued_list = tk.Listbox(right, height=12)
         self.queued_list.pack(fill="both", expand=True)
 
-        self.task_tab_output = tk.Text(body, height=8, wrap="word")
+        self.task_tab_output = tk.Text(body, height=4, wrap="word")
         self.task_tab_output.pack(fill="x", pady=(8, 0))
+        self.task_terminal = tk.Text(
+            body,
+            height=12,
+            wrap="none",
+            bg="#101315",
+            fg="#9CF5C6",
+            insertbackground="#9CF5C6",
+        )
+        self.task_terminal.pack(fill="both", expand=True, pady=(6, 0))
+        self.task_terminal.insert("1.0", "CTMT Task Terminal\n")
         self._refresh_task_tab()
         self._schedule_task_tab_refresh()
 
@@ -714,6 +724,23 @@ class CTMTGuiApp:
                 f"Running: {self.running_tasks}/{self._task_limit()} | Queued: {len(self.task_queue)} | Queue paused: {self.queue_paused}",
             )
 
+    def _append_task_terminal(self, line: str) -> None:
+        if not hasattr(self, "task_terminal"):
+            return
+        ts = datetime.now().strftime("%H:%M:%S")
+        msg = f"[{ts}] {line}\n"
+        self.task_terminal.insert("end", msg)
+        self.task_terminal.see("end")
+        # Keep terminal reasonably bounded in GUI memory.
+        max_lines = 1500
+        current_lines = int(self.task_terminal.index("end-1c").split(".")[0])
+        if current_lines > max_lines:
+            drop = current_lines - max_lines
+            self.task_terminal.delete("1.0", f"{drop}.0")
+
+    def _append_task_terminal_from_worker(self, line: str) -> None:
+        self.root.after(0, lambda: self._append_task_terminal(line))
+
     def _schedule_task_tab_refresh(self) -> None:
         if self.task_tab_job:
             try:
@@ -725,6 +752,7 @@ class CTMTGuiApp:
 
     def _toggle_queue_pause(self) -> None:
         self.queue_paused = not self.queue_paused
+        self._append_task_terminal(f"QUEUE {'PAUSED' if self.queue_paused else 'RESUMED'}")
         self._refresh_task_tab()
         if (not self.queue_paused) and self.running_tasks < self._task_limit() and self.task_queue:
             self._set_busy(False, task_name="Queue resumed")
@@ -738,6 +766,7 @@ class CTMTGuiApp:
                 removed = items.pop(idx)
                 self.task_queue = deque(items)
                 self._append_settings(f"Removed queued task: {removed[0]}")
+                self._append_task_terminal(f"REMOVED queued task: {removed[0]}")
                 self._refresh_task_tab()
                 return
         rsel = self.running_list.curselection() if hasattr(self, "running_list") else ()
@@ -758,6 +787,8 @@ class CTMTGuiApp:
             return
         items[idx], items[new_idx] = items[new_idx], items[idx]
         self.task_queue = deque(items)
+        moved = str(items[new_idx][0]) if 0 <= new_idx < len(items) else "task"
+        self._append_task_terminal(f"REPRIORITIZED queued task: {moved} -> position {new_idx + 1}")
         self._refresh_task_tab()
         self.queued_list.selection_set(new_idx)
 
@@ -811,6 +842,7 @@ class CTMTGuiApp:
 
     def _start_run_all_panels(self) -> None:
         self._set_busy(True, "Live Dashboard (All Panels)")
+        self._append_task_terminal("START Live Dashboard (All Panels)")
         self.live_output.delete("1.0", tk.END)
 
         def worker():
@@ -818,6 +850,9 @@ class CTMTGuiApp:
             chunks = []
             for p in self.live_panels:
                 res = bridge.run_live_panel(asdict(p))
+                log = (res.get("log", "") or "").strip()
+                if log:
+                    self._append_task_terminal_from_worker(f"LOG [{p.name}] {log[:4000]}")
                 if not res.get("ok"):
                     chunks.append(f"=== {p.name} ===\nERROR: {res.get('error', 'unknown')}\n")
                     continue
@@ -839,7 +874,7 @@ class CTMTGuiApp:
                 chunks.append("\n".join(text) + "\n")
 
             out = "\n".join(chunks)
-            self.root.after(0, lambda: self._finish_live_output(out))
+            self.root.after(0, lambda: self._finish_live_output(out, "Live Dashboard (All Panels)"))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -853,12 +888,16 @@ class CTMTGuiApp:
 
     def _start_run_live_job(self, panel: LivePanelConfig, selected_only: bool = False) -> None:
         self._set_busy(True, f"Live Dashboard ({panel.name})")
+        self._append_task_terminal(f"START Live Dashboard ({panel.name})")
         if selected_only:
             self.live_output.delete("1.0", tk.END)
 
         def worker():
             bridge = self._bridge_for_task()
             res = bridge.run_live_panel(asdict(panel))
+            log = (res.get("log", "") or "").strip()
+            if log:
+                self._append_task_terminal_from_worker(f"LOG [{panel.name}] {log[:4000]}")
             if not res.get("ok"):
                 out = f"ERROR: {res.get('error', 'unknown')}"
             else:
@@ -878,13 +917,14 @@ class CTMTGuiApp:
                     for n in notes:
                         lines.append(f"- {n}")
                 out = "\n".join(lines)
-            self.root.after(0, lambda: self._finish_live_output(out))
+            self.root.after(0, lambda: self._finish_live_output(out, f"Live Dashboard ({panel.name})"))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_live_output(self, text: str) -> None:
+    def _finish_live_output(self, text: str, task_name: str = "Live Dashboard") -> None:
         self.live_output.delete("1.0", tk.END)
         self.live_output.insert("1.0", text)
+        self._append_task_terminal(f"DONE {task_name}")
         self._set_busy(False)
         self._persist_state()
 
@@ -917,6 +957,7 @@ class CTMTGuiApp:
 
     def _start_run_backtest(self) -> None:
         self._set_busy(True, "Backtest")
+        self._append_task_terminal("START Backtest")
         self.bt_summary.delete("1.0", tk.END)
         self.bt_trades.delete("1.0", tk.END)
 
@@ -965,6 +1006,9 @@ class CTMTGuiApp:
         def worker():
             bridge = self._bridge_for_task()
             res = bridge.run_backtest(cfg)
+            log = (res.get("log", "") or "").strip()
+            if log:
+                self._append_task_terminal_from_worker(f"LOG [Backtest] {log[:6000]}")
             self.root.after(0, lambda: self._finish_backtest_output(res))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -972,9 +1016,11 @@ class CTMTGuiApp:
     def _finish_backtest_output(self, res: Dict[str, Any]) -> None:
         if not res.get("ok"):
             self.bt_summary.insert("1.0", f"ERROR: {res.get('error', 'unknown')}")
+            self._append_task_terminal(f"DONE Backtest (error: {res.get('error', 'unknown')})")
         else:
             self.bt_summary.insert("1.0", res.get("summary_text", ""))
             self.bt_trades.insert("1.0", res.get("trades_text", ""))
+            self._append_task_terminal("DONE Backtest")
         self._set_busy(False)
 
     def _run_ai_analysis(self) -> None:
@@ -984,10 +1030,12 @@ class CTMTGuiApp:
 
     def _start_run_ai_analysis(self) -> None:
         self._set_busy(True, "AI Analysis")
+        self._append_task_terminal("START AI Analysis")
         self.ai_output.delete("1.0", tk.END)
         text = self._resolve_ai_source_text()
         if not text.strip():
             self.ai_output.insert("1.0", "No source text available.")
+            self._append_task_terminal("DONE AI Analysis (no source text)")
             self._set_busy(False)
             return
         self.ai_last_source_text = text
@@ -999,11 +1047,15 @@ class CTMTGuiApp:
             if not ok:
                 self._set_busy(False)
                 self.ai_output.insert("1.0", "AI request canceled by user.")
+                self._append_task_terminal("DONE AI Analysis (canceled)")
                 return
 
         def worker():
             bridge = self._bridge_for_task()
             res = bridge.run_ai_analysis(text, dt, prompt_override=prompt)
+            log = (res.get("log", "") or "").strip()
+            if log:
+                self._append_task_terminal_from_worker(f"LOG [AI] {log[:6000]}")
             self.root.after(0, lambda: self._finish_ai_output(res))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1012,6 +1064,7 @@ class CTMTGuiApp:
         if not res.get("ok"):
             self.ai_output.insert("1.0", "AI analysis failed or returned empty response.\n\nPrompt preview:\n\n")
             self.ai_output.insert("end", (res.get("prompt", "") or "")[:4000])
+            self._append_task_terminal("DONE AI Analysis (failed/empty)")
         else:
             response = res.get("response", "")
             self.ai_output.insert("1.0", response)
@@ -1019,6 +1072,7 @@ class CTMTGuiApp:
             if used_prompt:
                 self.ai_conversation.append({"role": "user", "content": used_prompt})
             self.ai_conversation.append({"role": "assistant", "content": response})
+            self._append_task_terminal("DONE AI Analysis")
         self._set_busy(False)
 
     def _run_ai_followup(self) -> None:
@@ -1035,6 +1089,7 @@ class CTMTGuiApp:
             messagebox.showinfo("Follow-up", "Run an initial AI analysis first.")
             return
         self._set_busy(True, "AI Follow-up")
+        self._append_task_terminal("START AI Follow-up")
         dt = self.ai_datetime.get().strip() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         history = self.ai_conversation[-6:]
         lines = [
@@ -1060,6 +1115,7 @@ class CTMTGuiApp:
             ok = messagebox.askyesno("Confirm AI Follow-up", f"Send this follow-up prompt?\n\n{preview}")
             if not ok:
                 self._set_busy(False)
+                self._append_task_terminal("DONE AI Follow-up (canceled)")
                 return
 
         def worker():
@@ -1069,6 +1125,9 @@ class CTMTGuiApp:
                 dt,
                 prompt_override=prompt,
             )
+            log = (res.get("log", "") or "").strip()
+            if log:
+                self._append_task_terminal_from_worker(f"LOG [AI Follow-up] {log[:6000]}")
             self.root.after(0, lambda: self._finish_ai_followup(res, follow))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1077,6 +1136,7 @@ class CTMTGuiApp:
         if not res.get("ok"):
             self.ai_output.insert("1.0", "AI follow-up failed.\n\n")
             self.ai_output.insert("end", (res.get("prompt", "") or "")[:4000])
+            self._append_task_terminal("DONE AI Follow-up (failed)")
         else:
             response = res.get("response", "")
             current = self.ai_output.get("1.0", tk.END).strip()
@@ -1089,6 +1149,7 @@ class CTMTGuiApp:
             self.ai_conversation.append({"role": "user", "content": follow_text})
             self.ai_conversation.append({"role": "assistant", "content": response})
             self.ai_followup_var.set("")
+            self._append_task_terminal("DONE AI Follow-up")
         self._set_busy(False)
 
     def _resolve_ai_source_text(self) -> str:
@@ -1145,6 +1206,7 @@ class CTMTGuiApp:
     def _start_run_research_job(self, standard: bool) -> None:
         task_name = "Auto-Research (Standard)" if standard else "Auto-Research (Comprehensive)"
         self._set_busy(True, task_name)
+        self._append_task_terminal(f"START {task_name}")
         self.rs_output.delete("1.0", tk.END)
 
         def worker():
@@ -1159,6 +1221,12 @@ class CTMTGuiApp:
                     optuna_trials=max(1, int(self.rs_trials.get() or "10")),
                     optuna_jobs=max(1, int(self.rs_jobs.get() or "4")),
                 )
+            stdlog = (out.get("stdout", "") or "").strip()
+            errlog = (out.get("stderr", "") or "").strip()
+            if stdlog:
+                self._append_task_terminal_from_worker(f"LOG [{task_name}] {stdlog[:6000]}")
+            if errlog:
+                self._append_task_terminal_from_worker(f"ERR [{task_name}] {errlog[:6000]}")
             self.root.after(0, lambda: self._finish_research_output(out))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1209,6 +1277,10 @@ class CTMTGuiApp:
         if out.get("stderr"):
             lines += ["STDERR:", out["stderr"], ""]
         self.rs_output.insert("1.0", "\n".join(lines))
+        if out.get("ok"):
+            self._append_task_terminal("DONE Auto-Research")
+        else:
+            self._append_task_terminal("DONE Auto-Research (error)")
         self._set_busy(False)
 
     def _save_dashboard_profile(self) -> None:
