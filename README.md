@@ -92,6 +92,10 @@ GUI task execution:
   - queued task reprioritization (move up/down)
   - terminal-style live log pane for task start/completion and captured backend output
 
+GUI dashboard readability:
+
+- Live/Backtest text outputs now apply color highlighting for key sections and action states (`BUY/HOLD/SELL`) to improve scanability.
+
 GUI AI configuration:
 
 - AI profiles can now be managed directly in GUI Settings:

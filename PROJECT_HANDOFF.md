@@ -185,6 +185,8 @@
   - running tasks are viewable; hard-stop for active running tasks is still not implemented
   - fixed Task Monitor staleness by adding periodic (~1s) tab refresh and state-change refresh hooks
   - added terminal-style live log pane at Task Monitor bottom for start/done events and captured backend logs (useful for progress visibility/debugging)
+- Added GUI text color-highlighting for dashboard readability:
+  - highlights key sections and emphasizes `BUY/HOLD/SELL` action labels in live/backtest panes
 
 ## Current Files of Interest
 - `nightly/BTC-beta.py`
@@ -246,7 +248,7 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-10T03:00:00+00:00
+- Last update UTC: 2026-04-10T03:12:41+00:00
 - Latest experiment artifact: `experiments/runs/run_20260410T025556Z.json`
 - Champion scenarios tracked: 4
 - Latest run summary:

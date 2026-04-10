@@ -193,6 +193,7 @@ class CTMTGuiApp:
 
         self.live_output = tk.Text(right, wrap="none")
         self.live_output.pack(fill="both", expand=True)
+        self._configure_dashboard_tags(self.live_output)
 
     def _build_backtest_tab(self) -> None:
         top = ttk.Frame(self.backtest_tab, padding=8)
@@ -269,8 +270,10 @@ class CTMTGuiApp:
 
         self.bt_summary = tk.Text(out, height=10, wrap="word")
         self.bt_summary.pack(fill="x")
+        self._configure_dashboard_tags(self.bt_summary)
         self.bt_trades = tk.Text(out, wrap="none")
         self.bt_trades.pack(fill="both", expand=True, pady=(8, 0))
+        self._configure_dashboard_tags(self.bt_trades)
 
     def _build_ai_tab(self) -> None:
         top = ttk.Frame(self.ai_tab, padding=8)
@@ -466,6 +469,55 @@ class CTMTGuiApp:
         row.pack(fill="x", pady=2)
         ttk.Label(row, text=label, width=16).pack(side="left")
         ttk.Entry(row, textvariable=var, width=18).pack(side="left")
+
+    def _configure_dashboard_tags(self, widget: tk.Text) -> None:
+        # Section/header emphasis
+        widget.tag_configure("hdr", foreground="#7FDBFF")
+        widget.tag_configure("subhdr", foreground="#FFD166")
+        # Action emphasis
+        widget.tag_configure("buy", foreground="#2ECC71")
+        widget.tag_configure("hold", foreground="#F39C12")
+        widget.tag_configure("sell", foreground="#E74C3C")
+        # Result emphasis
+        widget.tag_configure("okline", foreground="#2ECC71")
+        widget.tag_configure("errline", foreground="#FF6B6B")
+
+    def _apply_color_tags(self, widget: tk.Text) -> None:
+        if widget is None:
+            return
+        # Clear prior highlights
+        for tag in ("hdr", "subhdr", "buy", "hold", "sell", "okline", "errline"):
+            widget.tag_remove(tag, "1.0", tk.END)
+
+        def _tag_all(needle: str, tag: str, nocase: bool = True) -> None:
+            start = "1.0"
+            while True:
+                idx = widget.search(needle, start, stopindex=tk.END, nocase=nocase)
+                if not idx:
+                    break
+                end = f"{idx}+{len(needle)}c"
+                widget.tag_add(tag, idx, end)
+                start = end
+
+        # Headers and sections commonly present in CLI-style output
+        for k in ("LIVE DASHBOARD", "RISK SCORE BREAKDOWN", "PORTFOLIO CONTEXT", "TRADE HISTORY", "Final Value", "Total Return"):
+            _tag_all(k, "hdr")
+        for k in ("Assets loaded", "Running", "Queued"):
+            _tag_all(k, "subhdr")
+
+        # Action words (including emoji variants)
+        for k in ("🟢 BUY", " BUY "):
+            _tag_all(k, "buy")
+        for k in ("🟠 HOLD", " HOLD "):
+            _tag_all(k, "hold")
+        for k in ("🔴 SELL", " SELL "):
+            _tag_all(k, "sell")
+
+        # Outcome markers
+        for k in ("DONE", "SUCCESS", "OK"):
+            _tag_all(k, "okline")
+        for k in ("ERROR", "FAILED", "Traceback"):
+            _tag_all(k, "errline")
 
     def _labeled_combo(
         self,
@@ -924,6 +976,7 @@ class CTMTGuiApp:
     def _finish_live_output(self, text: str, task_name: str = "Live Dashboard") -> None:
         self.live_output.delete("1.0", tk.END)
         self.live_output.insert("1.0", text)
+        self._apply_color_tags(self.live_output)
         self._append_task_terminal(f"DONE {task_name}")
         self._set_busy(False)
         self._persist_state()
@@ -1021,6 +1074,8 @@ class CTMTGuiApp:
             self.bt_summary.insert("1.0", res.get("summary_text", ""))
             self.bt_trades.insert("1.0", res.get("trades_text", ""))
             self._append_task_terminal("DONE Backtest")
+        self._apply_color_tags(self.bt_summary)
+        self._apply_color_tags(self.bt_trades)
         self._set_busy(False)
 
     def _run_ai_analysis(self) -> None:
