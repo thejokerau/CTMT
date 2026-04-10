@@ -156,7 +156,7 @@ class BacktestConfig:
     tuned: TunedParams = field(default_factory=TunedParams)
 
 
-conn = sqlite3.connect(DB_PATH)
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 
 CUDA_AVAILABLE = False
 CUDA_BACKEND = "cpu"

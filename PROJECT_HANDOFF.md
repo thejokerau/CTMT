@@ -4,7 +4,7 @@
 - 2026-04-08
 
 ## Branch
-- `main`
+- `gui-nightly`
 
 ## Objective
 - Evolve `nightly/BTC-beta.py` into a robust multi-timeframe quant workflow with safer Fibonacci logic, faster backtesting, and tunable optimization.
@@ -122,6 +122,10 @@
   - user-selectable display currency in main menu
   - live dashboard shows converted price/Fib comparison columns
   - backtest summary now includes converted final value in selected local currency
+- Established dedicated GUI branch channels:
+  - created `gui-nightly` for active GUI development
+  - created `gui-stable` for GUI promotion/stabilization
+  - switched working branch to `gui-nightly`
 - Expanded Traditional asset selection scale:
   - regional curated universes enlarged beyond top-10
   - top-list selection now supports `Top 10 / Top 20 / Top 50 / Top 100` (when available)
@@ -136,6 +140,34 @@
 - Fixed cache date parsing compatibility bug:
   - `get_cached()` now parses mixed legacy date formats (`YYYY-MM-DD` and `YYYY-MM-DD HH:MM:SS`)
   - prevents crash when old cache rows use date-only strings
+- Started GUI implementation (Tkinter MVP) with modular bridge architecture:
+  - added `gui_app/engine_bridge.py` to invoke nightly engine features for live/backtest/AI/research
+  - added `gui_app/main.py` multi-tab desktop app:
+    - Live Dashboard tab: multi-panel configs, run selected/all, auto-refresh
+    - Backtest tab: parameterized run + summary/trades output
+    - AI Analysis tab: source selection (live/backtest/paste) + provider-backed response
+    - Auto-Research tab: standard + comprehensive run controls and log output
+    - Settings tab: display currency and user-defined dashboard profile save/load/delete
+  - added `gui_app/state.py` for secure user-local GUI state persistence under `%USERPROFILE%\\.ctmt\\gui\\`
+  - added launcher `scripts/run_gui.py`
+  - updated `README.md` with GUI launch command
+  - validated syntax compile for new GUI files and existing nightly/scripts modules
+- Improved GUI traditional-market country selector usability:
+  - switched from numeric-only country display to readable region labels
+  - added type-to-search filtering in selector
+  - added manual country-code override field for advanced/custom routing
+- Added branch-sync guardrail for required core-script propagation:
+  - new helper script `scripts/sync_core_to_nightly.py`
+  - checks `gui-nightly` vs `nightly` for required core file deltas (`nightly/BTC-beta.py`)
+  - optional minimal patch generation for controlled sync handoff
+- Added branch sync documentation:
+  - `docs/BRANCH_SYNC.md` with policy and operational flow
+  - `README.md` updated with core-sync command examples
+- Added GUI Advanced Mode parallel execution controls:
+  - settings toggle: `Advanced Mode: Parallel jobs (experimental)`
+  - configurable max concurrent jobs
+  - task scheduler now queues when saturated and starts queued jobs automatically
+  - per-task bridge instantiation in parallel mode to avoid single-bridge serialization
 
 ## Current Files of Interest
 - `nightly/BTC-beta.py`
@@ -147,6 +179,12 @@
 - `scripts/auto_research_cycle.py`
 - `experiments/scenarios.json`
 - `experiments/registry/champions.json`
+- `gui_app/main.py`
+- `gui_app/engine_bridge.py`
+- `gui_app/state.py`
+- `scripts/run_gui.py`
+- `scripts/sync_core_to_nightly.py`
+- `docs/BRANCH_SYNC.md`
 
 ## Known Issues / Risks
 - Some CoinGecko symbols still may not be usable across all data providers; filtering now favors Binance tradability for crypto.
@@ -166,6 +204,10 @@
 - Backtest snapshot artifacts are generated outputs and are now git-ignored.
 - User-local AI preference/secrets files are outside repo by design; backup/rotation policy is user-managed.
 - Legacy cache rows with malformed/unparseable dates are now dropped at read time; affected rows may need cache refresh if large.
+- GUI runtime behavior has not yet been fully integration-tested in this environment due desktop/display constraints.
+- GUI currently uses text-first output panes; richer native tables/charts and embedded chart views are pending.
+- Branch sync helper is workflow guidance/tooling, not an enforced git hook; manual execution is still required before promotion.
+- GUI parallel mode is experimental; concurrent cache writes may still hit transient SQLite lock contention in high-load scenarios.
 
 ## Run / Validate
 - Syntax check:
@@ -174,12 +216,9 @@
   - `python .\\nightly\\BTC-beta.py`
 
 ## Recommended Next Tasks
-1. Add deterministic benchmark mode (fixed ticker set + timeframe + seed-like controls) to compare optimization changes across commits.
-2. Extend automation outputs with per-scenario CSV exports (trades/equity/metrics) for offline analysis.
-3. Add champion confidence scoring and tie-break transparency in runtime prompt (why this champion was chosen).
-   - assets requested/loaded/dropped + reasons
-   - trades count by exit type
-   - average hold days and bars
+1. Run end-to-end manual GUI acceptance tests on target desktop (live/backtest/AI/research tabs).
+2. Burn in and tune GUI parallel mode reliability (queue behavior, SQLite lock handling, and user cancellation UX).
+3. Add an optional pre-push hook/CI check that runs `python scripts/sync_core_to_nightly.py --base nightly` on `gui-nightly`.
 
 ## Process Rule (Required)
 - For every future code change in this project, update this file in the same change set:
@@ -189,13 +228,13 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-10T01:11:12+00:00
-- Latest experiment artifact: `experiments/runs/run_20260409T224249Z.json`
+- Last update UTC: 2026-04-10T02:20:58+00:00
+- Latest experiment artifact: `experiments/runs/run_20260410T020023Z.json`
 - Champion scenarios tracked: 4
 - Latest run summary:
-- `crypto_1d_12m_top20`: selected `tuned`, return +37.23%, maxDD 34.50%, sharpe 0.89
-- `crypto_8h_12m_top20`: selected `tuned`, return +60.08%, maxDD 35.76%, sharpe 1.12
-- `crypto_8h_24m_top10`: selected `baseline`, return +88.06%, maxDD 30.47%, sharpe 0.99
-- `crypto_12h_24m_top10`: selected `tuned`, return +83.32%, maxDD 32.27%, sharpe 0.96
+- `crypto_1d_12m_top20`: selected `baseline`, return +37.77%, maxDD 35.62%, sharpe 0.89
+- `crypto_8h_12m_top20`: selected `baseline`, return +56.01%, maxDD 28.10%, sharpe 1.11
+- `crypto_8h_24m_top10`: selected `tuned`, return +74.71%, maxDD 35.67%, sharpe 1.04
+- `crypto_12h_24m_top10`: selected `tuned`, return +74.99%, maxDD 40.38%, sharpe 1.21
 <!-- AUTO_HANDBACK_END -->
 

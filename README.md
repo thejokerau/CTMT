@@ -1,15 +1,36 @@
-## Release & Branch Strategy (Best Practice)
+﻿## Release & Branch Strategy (Best Practice)
 
 Use separate long-lived branches for release channels:
 
-- **`main`** → stable production-ready channel
-- **`nightly`** → fast-moving integration channel for newest changes
+- **`main`** -> stable production-ready channel
+- **`nightly`** -> fast-moving integration channel for newest changes
+- **`gui-nightly`** -> fast-moving GUI integration channel
+- **`gui-stable`** -> GUI-stable promotion channel
 
 Recommended workflow:
 
 1. Develop features on short-lived feature branches.
-2. Merge feature branches into `nightly` first.
-3. Promote tested changes from `nightly` into `main` on cadence.
+2. Merge feature branches into `nightly` first for CLI/core work.
+3. Merge GUI-focused work into `gui-nightly`, then promote to `gui-stable`.
+4. Promote tested non-GUI changes from `nightly` into `main` on cadence.
+
+### Core Sync Guardrail (`gui-nightly` -> `nightly`)
+
+When changing core strategy/runtime behavior in `gui-nightly`, sync only required core edits into `nightly` (not GUI-only files).
+
+Core-sync helper:
+
+```bash
+python scripts/sync_core_to_nightly.py --base nightly
+```
+
+Optional patch generation for minimal sync:
+
+```bash
+python scripts/sync_core_to_nightly.py --base nightly --create-patch --patch-path experiments/reports/core_sync.patch
+```
+
+Detailed policy: `docs/BRANCH_SYNC.md`
 
 ## Script Layout
 
@@ -51,6 +72,23 @@ Nightly channel (`nightly` branch target):
 ```bash
 python nightly/BTC-beta.py
 ```
+
+GUI (gui-nightly branch):
+
+```bash
+python scripts/run_gui.py
+```
+
+GUI task execution:
+
+- Default mode runs one active task at a time (additional tasks are queued).
+- Optional `Advanced Mode: Parallel jobs (experimental)` can be enabled in GUI Settings to allow limited concurrent jobs.
+
+GUI traditional-region UX:
+
+- Country selector now uses readable region names (not numeric-only codes).
+- Selector is searchable by typing.
+- Manual country-code override field is available for advanced use.
 
 ## Nightly Highlights (`nightly/BTC-beta.py`)
 
@@ -230,3 +268,4 @@ Ollama behavior:
 - Nightly will try to call local Ollama directly.
 - If unreachable, it attempts to start `ollama serve` automatically.
 - If model is missing, it attempts auto-pull (`OLLAMA_AUTO_PULL=1` by default).
+
