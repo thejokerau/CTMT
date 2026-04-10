@@ -92,6 +92,16 @@ GUI task execution:
   - queued task reprioritization (move up/down)
   - terminal-style live log pane for task start/completion and captured backend output
 
+Live Dashboard preset management:
+
+- Preset/profile controls are available directly in the `Live Dashboard` tab.
+- Supports:
+  - save/update profile from selected panel(s)
+  - save/update profile from all current panels
+  - load single profile (replace current panels)
+  - merge multiple selected profiles (append)
+  - delete multiple selected profiles
+
 GUI dashboard readability:
 
 - Live/Backtest text outputs now apply color highlighting for key sections and action states (`BUY/HOLD/SELL`) to improve scanability.
@@ -116,6 +126,9 @@ GUI Portfolio & Ledger:
   - Duplicate-signal activity guard (cooldown-based) to reduce repeated same-signal actions
   - Manual ledger event entry (`BUY/SELL/HOLD`)
   - Current open-position tracking + historical ledger view
+  - AI recommendation staging queue with selective approval/submit flow
+  - open Binance order list + cancel selected orders from GUI
+  - execution modes: `manual`, `semi_auto`, `full_auto` (mode-controlled behavior)
 - Binance profiles can be managed in GUI Settings (similar to AI profiles):
   - create/update/set active/delete profile
   - secure key+secret storage outside repo

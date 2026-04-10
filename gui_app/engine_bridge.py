@@ -11,7 +11,7 @@ import time
 import urllib.parse
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
@@ -468,7 +468,15 @@ class EngineBridge:
             "secret_source": secret_source,
         }
 
-    def _signed_binance_get(self, endpoint: str, path: str, api_key: str, api_secret: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _signed_binance_request(
+        self,
+        method: str,
+        endpoint: str,
+        path: str,
+        api_key: str,
+        api_secret: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         q = dict(params or {})
         q["timestamp"] = int(time.time() * 1000)
         q.setdefault("recvWindow", 5000)
@@ -477,12 +485,21 @@ class EngineBridge:
         url = endpoint.rstrip("/") + path + "?" + query + "&signature=" + sig
         headers = {"X-MBX-APIKEY": api_key}
         try:
-            r = requests.get(url, headers=headers, timeout=30)
+            m = method.strip().upper()
+            if m == "POST":
+                r = requests.post(url, headers=headers, timeout=30)
+            elif m == "DELETE":
+                r = requests.delete(url, headers=headers, timeout=30)
+            else:
+                r = requests.get(url, headers=headers, timeout=30)
             if not (200 <= r.status_code < 300):
                 return {"ok": False, "status": r.status_code, "error": (r.text or "")[:1200]}
             return {"ok": True, "status": r.status_code, "data": r.json()}
         except Exception as e:
             return {"ok": False, "status": -1, "error": str(e)}
+
+    def _signed_binance_get(self, endpoint: str, path: str, api_key: str, api_secret: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._signed_binance_request("GET", endpoint, path, api_key, api_secret, params=params)
 
     def list_binance_profiles(self) -> Dict[str, Any]:
         with self._lock:
@@ -722,6 +739,135 @@ class EngineBridge:
                 "total_est_usd": round(total_usd, 2),
                 "balances": rows,
             }
+
+    def _resolve_active_binance_profile(self, profile_name: Optional[str] = None) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[Dict[str, str]], Optional[str]]:
+        prefs = load_binance_preferences()
+        secrets = load_binance_secrets()
+        profiles = prefs.get("profiles", {}) if isinstance(prefs, dict) else {}
+        if not isinstance(profiles, dict) or not profiles:
+            return None, None, None, "No Binance profiles configured."
+        active = str(profile_name or prefs.get("active_profile", "") or "").strip()
+        if not active or active not in profiles:
+            active = next(iter(profiles.keys()))
+        profile = profiles.get(active, {})
+        if not isinstance(profile, dict):
+            return None, None, None, f"Profile not found: {active}"
+        creds = self._resolve_binance_credentials(profile, secrets)
+        if not creds["api_key"] or not creds["api_secret"]:
+            return None, None, None, f"Missing API key/secret ({creds['key_source']}, {creds['secret_source']})."
+        return active, profile, creds, None
+
+    def list_open_binance_orders(self, profile_name: Optional[str] = None, symbol: str = "") -> Dict[str, Any]:
+        with self._lock:
+            active, profile, creds, err = self._resolve_active_binance_profile(profile_name)
+            if err:
+                return {"ok": False, "error": err}
+            endpoint = str((profile or {}).get("endpoint", self._default_binance_endpoint()) or self._default_binance_endpoint())
+            params: Dict[str, Any] = {}
+            sym = str(symbol).strip().upper()
+            if sym:
+                params["symbol"] = sym
+            out = self._signed_binance_get(endpoint, "/api/v3/openOrders", str(creds["api_key"]), str(creds["api_secret"]), params=params)
+            if not out.get("ok"):
+                return {"ok": False, "status": out.get("status"), "error": out.get("error", "openOrders request failed")}
+            data = out.get("data", [])
+            rows: List[Dict[str, Any]] = []
+            if isinstance(data, list):
+                for o in data:
+                    if not isinstance(o, dict):
+                        continue
+                    rows.append(
+                        {
+                            "symbol": str(o.get("symbol", "") or ""),
+                            "orderId": int(o.get("orderId", 0) or 0),
+                            "side": str(o.get("side", "") or ""),
+                            "type": str(o.get("type", "") or ""),
+                            "status": str(o.get("status", "") or ""),
+                            "price": str(o.get("price", "") or ""),
+                            "origQty": str(o.get("origQty", "") or ""),
+                            "executedQty": str(o.get("executedQty", "") or ""),
+                        }
+                    )
+            return {"ok": True, "profile": active, "orders": rows}
+
+    def cancel_binance_order(self, symbol: str, order_id: int, profile_name: Optional[str] = None) -> Dict[str, Any]:
+        with self._lock:
+            sym = str(symbol).strip().upper()
+            if not sym:
+                return {"ok": False, "error": "Symbol is required."}
+            oid = int(order_id or 0)
+            if oid <= 0:
+                return {"ok": False, "error": "order_id must be > 0."}
+            active, profile, creds, err = self._resolve_active_binance_profile(profile_name)
+            if err:
+                return {"ok": False, "error": err}
+            endpoint = str((profile or {}).get("endpoint", self._default_binance_endpoint()) or self._default_binance_endpoint())
+            out = self._signed_binance_request(
+                "DELETE",
+                endpoint,
+                "/api/v3/order",
+                str(creds["api_key"]),
+                str(creds["api_secret"]),
+                params={"symbol": sym, "orderId": oid},
+            )
+            if not out.get("ok"):
+                return {"ok": False, "status": out.get("status"), "error": out.get("error", "cancel request failed")}
+            return {"ok": True, "profile": active, "data": out.get("data", {})}
+
+    def submit_binance_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: float,
+        profile_name: Optional[str] = None,
+        price: Optional[float] = None,
+        time_in_force: str = "GTC",
+    ) -> Dict[str, Any]:
+        with self._lock:
+            sym = str(symbol).strip().upper()
+            s = str(side).strip().upper()
+            t = str(order_type).strip().upper()
+            if not sym or s not in ("BUY", "SELL"):
+                return {"ok": False, "error": "Valid symbol and side (BUY/SELL) are required."}
+            if t not in ("MARKET", "LIMIT"):
+                return {"ok": False, "error": "order_type must be MARKET or LIMIT."}
+            try:
+                qty = float(quantity)
+            except Exception:
+                qty = 0.0
+            if qty <= 0:
+                return {"ok": False, "error": "Quantity must be > 0."}
+            active, profile, creds, err = self._resolve_active_binance_profile(profile_name)
+            if err:
+                return {"ok": False, "error": err}
+            endpoint = str((profile or {}).get("endpoint", self._default_binance_endpoint()) or self._default_binance_endpoint())
+            params: Dict[str, Any] = {
+                "symbol": sym,
+                "side": s,
+                "type": t,
+                "quantity": f"{qty:.8f}".rstrip("0").rstrip("."),
+            }
+            if t == "LIMIT":
+                try:
+                    px = float(price or 0.0)
+                except Exception:
+                    px = 0.0
+                if px <= 0:
+                    return {"ok": False, "error": "Limit orders require positive price."}
+                params["price"] = f"{px:.8f}".rstrip("0").rstrip(".")
+                params["timeInForce"] = str(time_in_force or "GTC").upper()
+            out = self._signed_binance_request(
+                "POST",
+                endpoint,
+                "/api/v3/order",
+                str(creds["api_key"]),
+                str(creds["api_secret"]),
+                params=params,
+            )
+            if not out.get("ok"):
+                return {"ok": False, "status": out.get("status"), "error": out.get("error", "order submit failed")}
+            return {"ok": True, "profile": active, "data": out.get("data", {})}
 
     def get_trade_ledger(self) -> Dict[str, Any]:
         with self._lock:

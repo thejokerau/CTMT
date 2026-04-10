@@ -210,6 +210,20 @@
   - duplicate-signal cooldown guard to avoid repeated same-signal entries
   - import live dashboard signals (`BUY/HOLD/SELL`) into guarded ledger
   - manual ledger event entry support
+- Added AI-to-execution bridge in GUI:
+  - stage BUY/SELL recommendations parsed from AI output into pending queue
+  - selective multi-row approval/submit to Binance (user confirms before submit)
+  - per-row editable quantity/order type for pending recommendations
+  - pending state tracking (`PENDING/BLOCKED/SUBMITTED/FAILED`)
+- Added open-order trade controls in GUI:
+  - fetch Binance open orders
+  - cancel selected open orders directly from GUI
+- Moved dashboard preset workflow into Live Dashboard tab:
+  - save/update from selected panels
+  - save/update from all panels
+  - load single profile (replace)
+  - merge multiple profiles (append)
+  - delete selected profiles
 - Updated AI dashboard prompt contract:
   - AI outputs are now instructed to include a final `Recommended API Snippet` Python section aligned to recommendations
 
@@ -277,7 +291,7 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-10T04:21:29+00:00
+- Last update UTC: 2026-04-10T06:34:38+00:00
 - Latest experiment artifact: `experiments/runs/run_20260410T031732Z.json`
 - Champion scenarios tracked: 4
 - Latest run summary:

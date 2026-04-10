@@ -95,6 +95,8 @@ class CTMTGuiApp:
         self._ai_profiles_cache: Dict[str, Dict[str, Any]] = {}
         self._binance_profiles_cache: Dict[str, Dict[str, Any]] = {}
         self.latest_portfolio_snapshot: Dict[str, Any] = {}
+        self.pending_recommendations: List[Dict[str, Any]] = []
+        self._pending_rec_seq = 0
 
         self.live_panels: List[LivePanelConfig] = []
         for p in self.state.get("live_panels", []):
@@ -157,7 +159,7 @@ class CTMTGuiApp:
         right.pack(side="left", fill="both", expand=True)
 
         ttk.Label(left, text="Panels").pack(anchor="w")
-        self.panel_list = tk.Listbox(left, width=40, height=18)
+        self.panel_list = tk.Listbox(left, width=40, height=18, selectmode="extended")
         self.panel_list.pack(fill="y", pady=(4, 8))
         self.panel_list.bind("<<ListboxSelect>>", lambda e: self._load_selected_panel_to_form())
 
@@ -202,6 +204,20 @@ class CTMTGuiApp:
         self._labeled_entry(auto, "Seconds", self.refresh_secs_var)
         ttk.Button(auto, text="Start Auto", command=self._start_auto_refresh).pack(fill="x")
         ttk.Button(auto, text="Stop Auto", command=self._stop_auto_refresh).pack(fill="x", pady=2)
+
+        presets = ttk.LabelFrame(left, text="Dashboard Presets", padding=8)
+        presets.pack(fill="x", pady=8)
+        self.live_profile_name_var = tk.StringVar(value="default")
+        self._labeled_entry(presets, "Profile Name", self.live_profile_name_var)
+        ttk.Button(presets, text="Save/Update from Selected Panels", command=self._save_live_profile_from_selected).pack(fill="x", pady=2)
+        ttk.Button(presets, text="Save/Update from All Panels", command=self._save_live_profile_from_all).pack(fill="x", pady=2)
+        ttk.Label(presets, text="Saved Profiles (multi-select)").pack(anchor="w", pady=(6, 2))
+        self.live_profile_list = tk.Listbox(presets, height=5, selectmode="extended")
+        self.live_profile_list.pack(fill="x")
+        ttk.Button(presets, text="Load Selected Profile (Replace)", command=self._load_selected_profile_replace).pack(fill="x", pady=2)
+        ttk.Button(presets, text="Merge Selected Profiles (Append)", command=self._merge_selected_profiles).pack(fill="x", pady=2)
+        ttk.Button(presets, text="Delete Selected Profiles", command=self._delete_selected_profiles).pack(fill="x", pady=2)
+        self._refresh_saved_profile_list()
 
         self.live_output = tk.Text(right, wrap="none")
         self.live_output.pack(fill="both", expand=True)
@@ -322,6 +338,8 @@ class CTMTGuiApp:
         self.btn_run_ai = ttk.Button(top, text="Run AI Analysis", command=self._run_ai_analysis)
         self.btn_run_ai.pack(side="left", padx=8)
         ttk.Button(top, text="Preview Prompt", command=self._preview_ai_prompt).pack(side="left")
+        ttk.Button(top, text="Stage Recommendations", command=self._stage_ai_recommendations).pack(side="left", padx=6)
+        ttk.Button(top, text="Clear Pending", command=self._clear_pending_recommendations).pack(side="left")
 
         self.ai_input = tk.Text(body, height=10, wrap="word")
         self.ai_input.pack(fill="x")
@@ -349,6 +367,8 @@ class CTMTGuiApp:
         body.pack(fill="both", expand=True)
 
         self.pf_binance_profile_var = tk.StringVar(value="")
+        self.pf_exec_mode_var = tk.StringVar(value="semi_auto")
+        self.pf_quote_var = tk.StringVar(value="USDT")
         self.pf_cooldown_min_var = tk.StringVar(value="240")
         self.pf_track_hold_var = tk.BooleanVar(value=True)
         self.pf_manual_asset_var = tk.StringVar(value="")
@@ -357,10 +377,16 @@ class CTMTGuiApp:
         self.pf_manual_qty_var = tk.StringVar(value="")
         self.pf_manual_tf_var = tk.StringVar(value="1d")
         self.pf_manual_note_var = tk.StringVar(value="")
+        self.pf_pending_qty_var = tk.StringVar(value="0")
+        self.pf_pending_type_var = tk.StringVar(value="MARKET")
 
         ttk.Label(top, text="Binance Profile").pack(side="left")
         self.pf_binance_profile_combo = ttk.Combobox(top, textvariable=self.pf_binance_profile_var, values=[], width=22, state="readonly")
         self.pf_binance_profile_combo.pack(side="left", padx=4)
+        ttk.Label(top, text="Mode").pack(side="left")
+        ttk.Combobox(top, textvariable=self.pf_exec_mode_var, values=["manual", "semi_auto", "full_auto"], width=10, state="readonly").pack(side="left", padx=4)
+        ttk.Label(top, text="Quote").pack(side="left")
+        ttk.Combobox(top, textvariable=self.pf_quote_var, values=["USDT", "USD", "BTC", "ETH", "BNB"], width=8, state="readonly").pack(side="left", padx=4)
         ttk.Button(top, text="Refresh Profiles", command=self._refresh_binance_profiles).pack(side="left", padx=(4, 8))
         ttk.Button(top, text="Refresh Portfolio", command=self._refresh_portfolio).pack(side="left")
         ttk.Label(top, text="Signal Cooldown (min)").pack(side="left", padx=(12, 0))
@@ -368,6 +394,40 @@ class CTMTGuiApp:
         ttk.Checkbutton(top, text="Track HOLD signals", variable=self.pf_track_hold_var).pack(side="left", padx=(8, 0))
         ttk.Button(top, text="Import Signals from Live", command=self._import_signals_from_live).pack(side="left", padx=8)
         ttk.Button(top, text="Refresh Ledger", command=self._refresh_ledger_view).pack(side="left")
+
+        pending_frame = ttk.LabelFrame(self.portfolio_tab, text="Pending Recommendations (Review & Approve)", padding=8)
+        pending_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.pending_tree = ttk.Treeview(
+            pending_frame,
+            columns=("id", "symbol", "side", "type", "qty", "tf", "conf", "status", "reason"),
+            show="headings",
+            height=6,
+            selectmode="extended",
+        )
+        for c, w in [
+            ("id", 46),
+            ("symbol", 90),
+            ("side", 60),
+            ("type", 70),
+            ("qty", 80),
+            ("tf", 50),
+            ("conf", 60),
+            ("status", 90),
+            ("reason", 520),
+        ]:
+            self.pending_tree.heading(c, text=c.upper())
+            self.pending_tree.column(c, width=w, anchor="w")
+        self.pending_tree.pack(fill="x", expand=False)
+        pending_btns = ttk.Frame(pending_frame)
+        pending_btns.pack(fill="x", pady=(6, 0))
+        ttk.Label(pending_btns, text="Set qty").pack(side="left")
+        ttk.Entry(pending_btns, textvariable=self.pf_pending_qty_var, width=10).pack(side="left", padx=4)
+        ttk.Label(pending_btns, text="type").pack(side="left")
+        ttk.Combobox(pending_btns, textvariable=self.pf_pending_type_var, values=["MARKET", "LIMIT"], width=8, state="readonly").pack(side="left", padx=4)
+        ttk.Button(pending_btns, text="Apply to Selected", command=self._apply_pending_edit_to_selected).pack(side="left", padx=6)
+        ttk.Button(pending_btns, text="Submit Selected", command=self._submit_selected_pending_orders).pack(side="left")
+        ttk.Button(pending_btns, text="Remove Selected", command=self._remove_selected_pending_orders).pack(side="left", padx=6)
+        ttk.Button(pending_btns, text="Clear All", command=self._clear_pending_recommendations).pack(side="left")
 
         manual = ttk.LabelFrame(self.portfolio_tab, text="Manual Ledger Event", padding=8)
         manual.pack(fill="x", padx=8, pady=(0, 8))
@@ -378,6 +438,36 @@ class CTMTGuiApp:
         self._labeled_entry(manual, "Qty", self.pf_manual_qty_var)
         self._labeled_entry(manual, "Note", self.pf_manual_note_var)
         ttk.Button(manual, text="Add Manual Event", command=self._add_manual_ledger_event).pack(fill="x", pady=(6, 0))
+
+        orders = ttk.LabelFrame(self.portfolio_tab, text="Open Binance Orders (Cancel via GUI)", padding=8)
+        orders.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        order_top = ttk.Frame(orders)
+        order_top.pack(fill="x")
+        self.pf_open_symbol_filter_var = tk.StringVar(value="")
+        ttk.Label(order_top, text="Symbol filter").pack(side="left")
+        ttk.Entry(order_top, textvariable=self.pf_open_symbol_filter_var, width=14).pack(side="left", padx=4)
+        ttk.Button(order_top, text="Refresh Open Orders", command=self._refresh_open_orders).pack(side="left")
+        ttk.Button(order_top, text="Cancel Selected", command=self._cancel_selected_open_orders).pack(side="left", padx=6)
+        self.open_orders_tree = ttk.Treeview(
+            orders,
+            columns=("symbol", "orderId", "side", "type", "status", "price", "origQty", "executedQty"),
+            show="headings",
+            height=6,
+            selectmode="extended",
+        )
+        for c, w in [
+            ("symbol", 90),
+            ("orderId", 100),
+            ("side", 60),
+            ("type", 70),
+            ("status", 90),
+            ("price", 100),
+            ("origQty", 90),
+            ("executedQty", 100),
+        ]:
+            self.open_orders_tree.heading(c, text=c)
+            self.open_orders_tree.column(c, width=w, anchor="w")
+        self.open_orders_tree.pack(fill="x", expand=False, pady=(6, 0))
 
         cols = ttk.Frame(body)
         cols.pack(fill="both", expand=True)
@@ -402,6 +492,7 @@ class CTMTGuiApp:
 
         self._refresh_binance_profiles()
         self._refresh_ledger_view()
+        self._refresh_pending_recommendations_view()
 
     def _build_research_tab(self) -> None:
         top = ttk.Frame(self.research_tab, padding=8)
@@ -489,14 +580,6 @@ class CTMTGuiApp:
             command=lambda: self._update_run_controls_and_status(),
         ).pack(anchor="w", pady=(8, 2))
         self._labeled_entry(frame, "Max parallel jobs", self.parallel_jobs_var)
-
-        dash_frame = ttk.LabelFrame(frame, text="User Dashboard Profiles", padding=8)
-        dash_frame.pack(fill="x", pady=8)
-        self.dashboard_name_var = tk.StringVar(value="default")
-        self._labeled_entry(dash_frame, "Profile Name", self.dashboard_name_var)
-        ttk.Button(dash_frame, text="Save Current Live Panels", command=self._save_dashboard_profile).pack(fill="x", pady=2)
-        ttk.Button(dash_frame, text="Load Profile", command=self._load_dashboard_profile).pack(fill="x", pady=2)
-        ttk.Button(dash_frame, text="Delete Profile", command=self._delete_dashboard_profile).pack(fill="x", pady=2)
 
         ai_frame = ttk.LabelFrame(frame, text="AI Profiles", padding=8)
         ai_frame.pack(fill="x", pady=8)
@@ -670,6 +753,131 @@ class CTMTGuiApp:
         if not sel:
             return None
         return int(sel[0])
+
+    def _selected_panel_indices(self) -> List[int]:
+        sel = list(self.panel_list.curselection())
+        if not sel:
+            return []
+        out: List[int] = []
+        for i in sel:
+            ii = int(i)
+            if 0 <= ii < len(self.live_panels):
+                out.append(ii)
+        return out
+
+    def _refresh_saved_profile_list(self) -> None:
+        if not hasattr(self, "live_profile_list"):
+            return
+        self.live_profile_list.delete(0, tk.END)
+        dashboards = self.state.get("saved_dashboards", {})
+        if not isinstance(dashboards, dict):
+            dashboards = {}
+        for name in sorted(dashboards.keys()):
+            self.live_profile_list.insert(tk.END, name)
+
+    def _selected_profile_names(self) -> List[str]:
+        if not hasattr(self, "live_profile_list"):
+            return []
+        sel = list(self.live_profile_list.curselection())
+        names: List[str] = []
+        for i in sel:
+            try:
+                names.append(str(self.live_profile_list.get(i)))
+            except Exception:
+                continue
+        return names
+
+    def _save_live_profile_from_selected(self) -> None:
+        name = (self.live_profile_name_var.get().strip() if hasattr(self, "live_profile_name_var") else "") or "default"
+        indices = self._selected_panel_indices()
+        if not indices:
+            messagebox.showinfo("Dashboard Presets", "Select one or more panels first.")
+            return
+        dashboards = self.state.get("saved_dashboards", {})
+        if not isinstance(dashboards, dict):
+            dashboards = {}
+        dashboards[name] = [asdict(self.live_panels[i]) for i in indices]
+        self.state["saved_dashboards"] = dashboards
+        self._persist_state()
+        self._refresh_saved_profile_list()
+        self._append_task_terminal(f"Saved dashboard profile `{name}` from {len(indices)} selected panel(s).")
+
+    def _save_live_profile_from_all(self) -> None:
+        name = (self.live_profile_name_var.get().strip() if hasattr(self, "live_profile_name_var") else "") or "default"
+        dashboards = self.state.get("saved_dashboards", {})
+        if not isinstance(dashboards, dict):
+            dashboards = {}
+        dashboards[name] = [asdict(p) for p in self.live_panels]
+        self.state["saved_dashboards"] = dashboards
+        self._persist_state()
+        self._refresh_saved_profile_list()
+        self._append_task_terminal(f"Saved dashboard profile `{name}` from all panels ({len(self.live_panels)}).")
+
+    def _load_selected_profile_replace(self) -> None:
+        names = self._selected_profile_names()
+        if not names:
+            messagebox.showinfo("Dashboard Presets", "Select one profile to load.")
+            return
+        if len(names) > 1:
+            messagebox.showinfo("Dashboard Presets", "Select only one profile for replace-load.")
+            return
+        dashboards = self.state.get("saved_dashboards", {})
+        if not isinstance(dashboards, dict) or names[0] not in dashboards:
+            messagebox.showerror("Dashboard Presets", f"Profile not found: {names[0]}")
+            return
+        panels = dashboards.get(names[0], [])
+        if not isinstance(panels, list) or not panels:
+            messagebox.showerror("Dashboard Presets", f"Profile is empty: {names[0]}")
+            return
+        self.live_panels = [LivePanelConfig(**p) for p in panels if isinstance(p, dict)]
+        self._refresh_panel_list()
+        self._persist_state()
+        self._append_task_terminal(f"Loaded dashboard profile `{names[0]}` (replace).")
+
+    def _merge_selected_profiles(self) -> None:
+        names = self._selected_profile_names()
+        if not names:
+            messagebox.showinfo("Dashboard Presets", "Select one or more profiles to merge.")
+            return
+        dashboards = self.state.get("saved_dashboards", {})
+        if not isinstance(dashboards, dict):
+            dashboards = {}
+        merged: List[LivePanelConfig] = []
+        for n in names:
+            panels = dashboards.get(n, [])
+            if not isinstance(panels, list):
+                continue
+            for p in panels:
+                if isinstance(p, dict):
+                    try:
+                        merged.append(LivePanelConfig(**p))
+                    except Exception:
+                        continue
+        if not merged:
+            messagebox.showerror("Dashboard Presets", "No panels found to merge from selected profiles.")
+            return
+        self.live_panels.extend(merged)
+        self._refresh_panel_list()
+        self._persist_state()
+        self._append_task_terminal(f"Merged {len(names)} profile(s), appended {len(merged)} panel(s).")
+
+    def _delete_selected_profiles(self) -> None:
+        names = self._selected_profile_names()
+        if not names:
+            messagebox.showinfo("Dashboard Presets", "Select one or more profiles to delete.")
+            return
+        ok = messagebox.askyesno("Dashboard Presets", f"Delete {len(names)} selected profile(s)?")
+        if not ok:
+            return
+        dashboards = self.state.get("saved_dashboards", {})
+        if not isinstance(dashboards, dict):
+            dashboards = {}
+        for n in names:
+            dashboards.pop(n, None)
+        self.state["saved_dashboards"] = dashboards
+        self._persist_state()
+        self._refresh_saved_profile_list()
+        self._append_task_terminal(f"Deleted {len(names)} dashboard profile(s).")
 
     def _load_selected_panel_to_form(self) -> None:
         idx = self._selected_panel_index()
@@ -1399,6 +1607,79 @@ class CTMTGuiApp:
         self.ai_output.delete("1.0", tk.END)
         self.ai_output.insert("1.0", "PROMPT PREVIEW\n" + ("=" * 60) + "\n" + prompt)
 
+    def _extract_trade_recommendations_from_ai_text(self, text: str) -> List[Dict[str, Any]]:
+        recs: List[Dict[str, Any]] = []
+        if not text.strip():
+            return recs
+        quote_default = "USDT"
+        try:
+            quote_default = (self.quote_var.get().strip().upper() or "USDT")
+        except Exception:
+            pass
+        lines = text.splitlines()
+        patt = re.compile(
+            r"\b(BUY|SELL)\b[^A-Z0-9]{0,8}\b([A-Z][A-Z0-9]{1,11})(?:[-/ ]?(USDT|USD|BTC|ETH|BNB))?\b",
+            re.IGNORECASE,
+        )
+        seen: set[Tuple[str, str]] = set()
+        for ln in lines:
+            m = patt.search(ln)
+            if not m:
+                continue
+            side = str(m.group(1)).upper()
+            base = str(m.group(2)).upper()
+            q = str(m.group(3) or quote_default).upper()
+            symbol = f"{base}{q}"
+            key = (symbol, side)
+            if key in seen:
+                continue
+            seen.add(key)
+            conf = ""
+            cm = re.search(r"(?:confidence|conviction)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)", ln, re.IGNORECASE)
+            if cm:
+                conf = cm.group(1)
+            self._pending_rec_seq += 1
+            recs.append(
+                {
+                    "id": self._pending_rec_seq,
+                    "symbol": symbol,
+                    "asset": base,
+                    "side": side,
+                    "order_type": "MARKET",
+                    "quantity": 0.0,
+                    "timeframe": (self.timeframe_var.get().strip() or "1d"),
+                    "confidence": conf,
+                    "status": "PENDING",
+                    "reason": ln.strip()[:220],
+                }
+            )
+        return recs
+
+    def _stage_ai_recommendations(self) -> None:
+        text = self.ai_output.get("1.0", tk.END).strip()
+        if not text:
+            messagebox.showinfo("AI Recommendations", "Run AI analysis first (or load AI output).")
+            return
+        recs = self._extract_trade_recommendations_from_ai_text(text)
+        if not recs:
+            messagebox.showinfo("AI Recommendations", "No BUY/SELL recommendations were detected in AI output.")
+            return
+        self.pending_recommendations.extend(recs)
+        self._refresh_pending_recommendations_view()
+        self._append_task_terminal(f"Staged {len(recs)} AI recommendation(s) into pending orders.")
+        if self.pf_exec_mode_var.get().strip().lower() == "full_auto":
+            self._append_task_terminal("Execution mode FULL_AUTO: attempting auto-submit for newly staged recommendations.")
+            if hasattr(self, "pending_tree"):
+                self.pending_tree.selection_set(*[str(r.get("id")) for r in recs])
+            self._submit_selected_pending_orders()
+            return
+        messagebox.showinfo("AI Recommendations", f"Staged {len(recs)} recommendation(s).")
+
+    def _clear_pending_recommendations(self) -> None:
+        self.pending_recommendations = []
+        self._refresh_pending_recommendations_view()
+        self._append_task_terminal("Cleared pending recommendations.")
+
     def _refresh_binance_profiles(self) -> None:
         res = self.bridge.list_binance_profiles()
         if not res.get("ok"):
@@ -1417,6 +1698,214 @@ class CTMTGuiApp:
         else:
             self.pf_binance_profile_var.set("")
         self._append_settings(f"Binance profiles loaded: {len(names)} (active: {self.pf_binance_profile_var.get() or 'none'})")
+
+    def _refresh_pending_recommendations_view(self) -> None:
+        if not hasattr(self, "pending_tree"):
+            return
+        self.pending_tree.delete(*self.pending_tree.get_children())
+        for r in self.pending_recommendations:
+            self.pending_tree.insert(
+                "",
+                "end",
+                iid=str(r.get("id", "")),
+                values=(
+                    r.get("id", ""),
+                    r.get("symbol", ""),
+                    r.get("side", ""),
+                    r.get("order_type", "MARKET"),
+                    r.get("quantity", 0),
+                    r.get("timeframe", ""),
+                    r.get("confidence", ""),
+                    r.get("status", "PENDING"),
+                    r.get("reason", ""),
+                ),
+            )
+
+    def _selected_pending_ids(self) -> List[int]:
+        if not hasattr(self, "pending_tree"):
+            return []
+        out: List[int] = []
+        for iid in self.pending_tree.selection():
+            try:
+                out.append(int(iid))
+            except Exception:
+                continue
+        return out
+
+    def _remove_selected_pending_orders(self) -> None:
+        ids = set(self._selected_pending_ids())
+        if not ids:
+            messagebox.showinfo("Pending Orders", "Select one or more pending rows.")
+            return
+        self.pending_recommendations = [r for r in self.pending_recommendations if int(r.get("id", -1)) not in ids]
+        self._refresh_pending_recommendations_view()
+        self._append_task_terminal(f"Removed {len(ids)} pending recommendation(s).")
+
+    def _apply_pending_edit_to_selected(self) -> None:
+        ids = set(self._selected_pending_ids())
+        if not ids:
+            messagebox.showinfo("Pending Orders", "Select rows first.")
+            return
+        try:
+            qty = float((self.pf_pending_qty_var.get() or "0").strip())
+        except Exception:
+            qty = 0.0
+        otype = str(self.pf_pending_type_var.get() or "MARKET").strip().upper()
+        changed = 0
+        for r in self.pending_recommendations:
+            if int(r.get("id", -1)) in ids:
+                if qty > 0:
+                    r["quantity"] = qty
+                r["order_type"] = otype
+                if str(r.get("status", "")).upper() == "BLOCKED":
+                    r["status"] = "PENDING"
+                changed += 1
+        self._refresh_pending_recommendations_view()
+        self._append_task_terminal(f"Updated {changed} pending recommendation(s).")
+
+    def _base_asset_from_symbol(self, symbol: str) -> str:
+        s = str(symbol).strip().upper()
+        for q in ["USDT", "USDC", "BUSD", "USD", "BTC", "ETH", "BNB"]:
+            if s.endswith(q) and len(s) > len(q):
+                return s[: -len(q)]
+        return s
+
+    def _submit_selected_pending_orders(self) -> None:
+        ids = self._selected_pending_ids()
+        if not ids:
+            messagebox.showinfo("Pending Orders", "Select one or more rows to submit.")
+            return
+        mode = self.pf_exec_mode_var.get().strip().lower()
+        if mode == "manual":
+            messagebox.showinfo("Execution Mode", "Current mode is MANUAL. Switch to semi_auto/full_auto to submit.")
+            return
+        profile = self.pf_binance_profile_var.get().strip() or None
+        if not profile:
+            messagebox.showinfo("Pending Orders", "Select a Binance profile first.")
+            return
+        ok = messagebox.askyesno("Submit Orders", f"Submit {len(ids)} selected order(s) to Binance?")
+        if not ok:
+            return
+        try:
+            cooldown = max(1, int((self.pf_cooldown_min_var.get() or "240").strip()))
+        except Exception:
+            cooldown = 240
+        submitted = 0
+        blocked = 0
+        failed = 0
+        for rid in ids:
+            rec = next((r for r in self.pending_recommendations if int(r.get("id", -1)) == int(rid)), None)
+            if not rec:
+                continue
+            if str(rec.get("status", "")).upper() not in ("PENDING", "FAILED"):
+                continue
+            symbol = str(rec.get("symbol", "")).strip().upper()
+            side = str(rec.get("side", "")).strip().upper()
+            order_type = str(rec.get("order_type", "MARKET")).strip().upper()
+            try:
+                qty = float(rec.get("quantity", 0.0) or 0.0)
+            except Exception:
+                qty = 0.0
+            if qty <= 0:
+                rec["status"] = "BLOCKED"
+                rec["reason"] = "Quantity is 0. Edit quantity before submit."
+                blocked += 1
+                continue
+            out = self.bridge.submit_binance_order(
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                quantity=qty,
+                profile_name=profile,
+            )
+            if not out.get("ok"):
+                rec["status"] = "FAILED"
+                rec["reason"] = str(out.get("error", "submit failed"))
+                failed += 1
+                continue
+            rec["status"] = "SUBMITTED"
+            submitted += 1
+            self.bridge.record_signal_event(
+                {
+                    "market": "crypto",
+                    "timeframe": str(rec.get("timeframe", "1d")),
+                    "panel": "ai_trade_queue",
+                    "asset": self._base_asset_from_symbol(symbol),
+                    "action": side,
+                    "qty": qty,
+                    "note": f"Submitted to Binance ({symbol})",
+                },
+                cooldown_minutes=cooldown,
+                allow_duplicate=False,
+            )
+        self._refresh_pending_recommendations_view()
+        self._refresh_ledger_view()
+        self._append_task_terminal(
+            f"Submitted pending orders -> submitted={submitted}, blocked={blocked}, failed={failed}"
+        )
+        messagebox.showinfo(
+            "Order Submission",
+            f"Submitted: {submitted}\nBlocked: {blocked}\nFailed: {failed}",
+        )
+
+    def _refresh_open_orders(self) -> None:
+        profile = self.pf_binance_profile_var.get().strip() or None
+        symbol_filter = self.pf_open_symbol_filter_var.get().strip().upper()
+        out = self.bridge.list_open_binance_orders(profile_name=profile, symbol=symbol_filter)
+        if not hasattr(self, "open_orders_tree"):
+            return
+        self.open_orders_tree.delete(*self.open_orders_tree.get_children())
+        if not out.get("ok"):
+            self._append_task_terminal(f"Open orders refresh failed: {out.get('error', 'unknown')}")
+            messagebox.showerror("Open Orders", str(out.get("error", "Failed to fetch open orders.")))
+            return
+        for o in out.get("orders", []) or []:
+            self.open_orders_tree.insert(
+                "",
+                "end",
+                values=(
+                    o.get("symbol", ""),
+                    o.get("orderId", ""),
+                    o.get("side", ""),
+                    o.get("type", ""),
+                    o.get("status", ""),
+                    o.get("price", ""),
+                    o.get("origQty", ""),
+                    o.get("executedQty", ""),
+                ),
+            )
+        self._append_task_terminal(f"Open orders refreshed ({len(out.get('orders', []) or [])} rows).")
+
+    def _cancel_selected_open_orders(self) -> None:
+        if not hasattr(self, "open_orders_tree"):
+            return
+        sels = list(self.open_orders_tree.selection())
+        if not sels:
+            messagebox.showinfo("Cancel Orders", "Select one or more open orders first.")
+            return
+        ok = messagebox.askyesno("Cancel Orders", f"Cancel {len(sels)} selected order(s)?")
+        if not ok:
+            return
+        profile = self.pf_binance_profile_var.get().strip() or None
+        done = 0
+        fail = 0
+        for iid in sels:
+            vals = self.open_orders_tree.item(iid, "values")
+            if not vals or len(vals) < 2:
+                continue
+            symbol = str(vals[0]).strip().upper()
+            try:
+                oid = int(vals[1])
+            except Exception:
+                continue
+            out = self.bridge.cancel_binance_order(symbol=symbol, order_id=oid, profile_name=profile)
+            if out.get("ok"):
+                done += 1
+            else:
+                fail += 1
+        self._refresh_open_orders()
+        self._append_task_terminal(f"Cancel orders -> canceled={done}, failed={fail}")
+        messagebox.showinfo("Cancel Orders", f"Canceled: {done}\nFailed: {fail}")
 
     def _refresh_portfolio(self) -> None:
         task_name = "Binance Portfolio Refresh"
