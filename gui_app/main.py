@@ -640,6 +640,10 @@ class StrataGuiApp:
 
         self.display_currency_var = tk.StringVar(value=self.state.get("display_currency", "USD"))
         self._labeled_combo(frame, "Display Currency", self.display_currency_var, ["USD", "AUD", "EUR", "GBP", "CAD", "JPY", "NZD", "SGD", "HKD", "CHF"])
+        self.primary_quote_var = tk.StringVar(value=self.state.get("primary_quote_asset", "USDT"))
+        self.quote_lock_var = tk.BooleanVar(value=bool(self.state.get("lock_primary_quote", False)))
+        self._labeled_combo(frame, "Primary Quote", self.primary_quote_var, ["USDT", "USDC", "BUSD", "FDUSD", "USD", "BTC", "ETH", "BNB"])
+        ttk.Checkbutton(frame, text="Lock primary quote across crypto dashboards/trades", variable=self.quote_lock_var).pack(anchor="w", pady=(2, 6))
         self.parallel_mode_var = tk.BooleanVar(value=bool(self.state.get("parallel_mode_enabled", False)))
         self.parallel_jobs_var = tk.StringVar(value=str(self.state.get("parallel_max_jobs", 2)))
         ttk.Checkbutton(
@@ -998,7 +1002,25 @@ class StrataGuiApp:
             display_currency=self.display_currency_var.get().strip() or "USD",
         )
         p.country = parse_country_code(self.country_var.get(), self.country_manual_var.get())
+        if p.market.lower() == "crypto" and self._is_primary_quote_locked():
+            p.quote_currency = self._primary_quote_asset()
         return p
+
+    def _primary_quote_asset(self) -> str:
+        return str(getattr(self, "primary_quote_var", tk.StringVar(value="USDT")).get() or "USDT").strip().upper() or "USDT"
+
+    def _is_primary_quote_locked(self) -> bool:
+        v = getattr(self, "quote_lock_var", None)
+        return bool(v.get()) if v is not None else False
+
+    def _effective_crypto_quote(self, fallback: str = "USDT") -> str:
+        if self._is_primary_quote_locked():
+            return self._primary_quote_asset()
+        try:
+            q = str(self.quote_var.get() or "").strip().upper()
+            return q or fallback
+        except Exception:
+            return fallback
 
     def _notify_busy(self, task_name: str) -> None:
         messagebox.showinfo("Task Queued", f"Task queued: {task_name}")
@@ -1328,7 +1350,11 @@ class StrataGuiApp:
             chunks = []
             panel_text_map: Dict[str, str] = {}
             for p in self.live_panels:
-                res = bridge.run_live_panel(asdict(p))
+                cfg = asdict(p)
+                cfg["display_currency"] = self.display_currency_var.get().strip() or "USD"
+                if str(cfg.get("market", "crypto")).strip().lower() == "crypto" and self._is_primary_quote_locked():
+                    cfg["quote_currency"] = self._primary_quote_asset()
+                res = bridge.run_live_panel(cfg)
                 log = (res.get("log", "") or "").strip()
                 if log:
                     self._append_task_terminal_from_worker(f"LOG [{p.name}] {log[:4000]}")
@@ -1375,7 +1401,11 @@ class StrataGuiApp:
 
         def worker():
             bridge = self._bridge_for_task()
-            res = bridge.run_live_panel(asdict(panel))
+            cfg = asdict(panel)
+            cfg["display_currency"] = self.display_currency_var.get().strip() or "USD"
+            if str(cfg.get("market", "crypto")).strip().lower() == "crypto" and self._is_primary_quote_locked():
+                cfg["quote_currency"] = self._primary_quote_asset()
+            res = bridge.run_live_panel(cfg)
             log = (res.get("log", "") or "").strip()
             if log:
                 self._append_task_terminal_from_worker(f"LOG [{panel.name}] {log[:4000]}")
@@ -1465,12 +1495,15 @@ class StrataGuiApp:
             except Exception:
                 return default
 
+        bt_quote = self.bt_quote.get()
+        if self.bt_market.get().strip().lower() == "crypto" and self._is_primary_quote_locked():
+            bt_quote = self._primary_quote_asset()
         cfg = {
             "market": self.bt_market.get(),
             "timeframe": self.bt_tf.get(),
             "months": _to_int(self.bt_months.get(), 12),
             "top_n": _to_int(self.bt_topn.get(), 20),
-            "quote_currency": self.bt_quote.get(),
+            "quote_currency": bt_quote,
             "country": parse_country_code(self.bt_country.get(), self.bt_country_manual.get()),
             "initial_capital": _to_float(self.bt_initial.get(), 10000.0),
             "stop_loss_pct": _to_float(self.bt_stop_loss.get(), 8.0),
@@ -1791,11 +1824,7 @@ class StrataGuiApp:
         structured = self._extract_structured_trade_plan_from_ai_text(text)
         if structured:
             return structured
-        quote_default = "USDT"
-        try:
-            quote_default = (self.quote_var.get().strip().upper() or "USDT")
-        except Exception:
-            pass
+        quote_default = self._effective_crypto_quote("USDT")
         allowed_assets: set[str] = set()
         for s in self._extract_signals_from_live_text((self.latest_live_output_text or "").strip()):
             a = str(s.get("asset", "")).strip().upper()
@@ -1824,6 +1853,7 @@ class StrataGuiApp:
                     continue
             q = str(m.group(3) or quote_default).upper()
             symbol = f"{base}{q}"
+            symbol = self._normalize_symbol_quote(symbol)
             key = (symbol, side)
             if key in seen:
                 continue
@@ -1885,11 +1915,7 @@ class StrataGuiApp:
         if not isinstance(trades, list):
             return []
 
-        quote_default = "USDT"
-        try:
-            quote_default = (self.quote_var.get().strip().upper() or "USDT")
-        except Exception:
-            pass
+        quote_default = self._effective_crypto_quote("USDT")
         allowed_assets: set[str] = set()
         for s in self._extract_signals_from_live_text((self.latest_live_output_text or "").strip()):
             a = str(s.get("asset", "")).strip().upper()
@@ -1909,6 +1935,7 @@ class StrataGuiApp:
 
             if not symbol and asset:
                 symbol = f"{asset}{quote_default}"
+            symbol = self._normalize_symbol_quote(symbol)
             if not asset and symbol:
                 asset = self._base_asset_from_symbol(symbol)
             if not symbol or not asset:
@@ -1989,6 +2016,8 @@ class StrataGuiApp:
                         "asset": str(r.get("asset", "")),
                         "action": str(r.get("side", "")),
                         "qty": 0.0,
+                        "quote_currency": self._quote_asset_from_symbol(str(r.get("symbol", ""))),
+                        "display_currency": self.display_currency_var.get().strip() or "USD",
                         "note": "AI interpretation signal",
                     },
                     cooldown_minutes=cooldown,
@@ -2109,7 +2138,20 @@ class StrataGuiApp:
         for q in ["USDT", "USDC", "BUSD", "USD", "BTC", "ETH", "BNB"]:
             if s.endswith(q) and len(s) > len(q):
                 return q
-        return str(self.pf_quote_var.get() or "USDT").strip().upper()
+        if self._is_primary_quote_locked():
+            return self._primary_quote_asset()
+        return str(self.pf_quote_var.get() or self._effective_crypto_quote("USDT")).strip().upper()
+
+    def _normalize_symbol_quote(self, symbol: str) -> str:
+        s = str(symbol).strip().upper()
+        if not s:
+            return s
+        if not self._is_primary_quote_locked():
+            return s
+        base = self._base_asset_from_symbol(s)
+        if not base or base == s:
+            return s
+        return f"{base}{self._primary_quote_asset()}"
 
     def _confidence_multiplier(self, raw: Any) -> float:
         if not bool(self.pf_auto_confidence_var.get()):
@@ -2321,6 +2363,9 @@ class StrataGuiApp:
                     "asset": self._base_asset_from_symbol(symbol),
                     "action": side,
                     "qty": qty,
+                    "price": float(out.get("normalized_price", 0.0) or 0.0),
+                    "quote_currency": self._quote_asset_from_symbol(symbol),
+                    "display_currency": self.display_currency_var.get().strip() or "USD",
                     "note": f"Submitted to Binance ({symbol})",
                     "is_execution": True,
                 },
@@ -2506,6 +2551,8 @@ class StrataGuiApp:
                     "panel": s.get("panel", "live"),
                     "asset": s.get("asset", ""),
                     "action": action,
+                    "quote_currency": self._effective_crypto_quote("USDT"),
+                    "display_currency": self.display_currency_var.get().strip() or "USD",
                     "note": "Imported from latest live dashboard",
                 },
                 cooldown_minutes=cooldown,
@@ -2554,6 +2601,8 @@ class StrataGuiApp:
                 "action": action,
                 "price": price,
                 "qty": qty,
+                "quote_currency": self._effective_crypto_quote("USDT"),
+                "display_currency": self.display_currency_var.get().strip() or "USD",
                 "note": note,
                 "is_execution": bool(qty > 0),
             },
@@ -2605,6 +2654,32 @@ class StrataGuiApp:
             lines.append(f"Signal Journal: {len(signal_entries)}")
             lines.append(f"Execution Ledger: {len(execution_entries)}")
             lines.append(f"Guard Keys: {len(guard) if isinstance(guard, dict) else 0}")
+            # Realized PnL summary in quote/display currencies (execution rows only).
+            realized_quote: Dict[str, float] = {}
+            realized_display: Dict[str, float] = {}
+            for e in execution_entries:
+                if not isinstance(e, dict):
+                    continue
+                try:
+                    pq = float(e.get("pnl_quote", 0.0) or 0.0)
+                except Exception:
+                    pq = 0.0
+                if abs(pq) > 0:
+                    qc = str(e.get("quote_currency", "USD") or "USD").strip().upper()
+                    realized_quote[qc] = realized_quote.get(qc, 0.0) + pq
+                try:
+                    pdv = float(e.get("pnl_display", 0.0) or 0.0)
+                except Exception:
+                    pdv = 0.0
+                if abs(pdv) > 0:
+                    dc = str(e.get("display_currency", self.display_currency_var.get() or "USD") or "USD").strip().upper()
+                    realized_display[dc] = realized_display.get(dc, 0.0) + pdv
+            if realized_quote:
+                qtxt = ", ".join([f"{k} {v:+,.4f}" for k, v in sorted(realized_quote.items())])
+                lines.append(f"Realized PnL (Quote): {qtxt}")
+            if realized_display:
+                dtxt = ", ".join([f"{k} {v:+,.4f}" for k, v in sorted(realized_display.items())])
+                lines.append(f"Realized PnL (Display): {dtxt}")
             lines.append("")
             if isinstance(entries, list) and entries:
                 df = pd.DataFrame(entries[-200:])
@@ -3046,6 +3121,8 @@ class StrataGuiApp:
 
     def _persist_state(self) -> None:
         self.state["display_currency"] = self.display_currency_var.get().strip() or "USD"
+        self.state["primary_quote_asset"] = self._primary_quote_asset()
+        self.state["lock_primary_quote"] = self._is_primary_quote_locked()
         self.state["auto_refresh_seconds"] = int(self.refresh_secs_var.get().strip() or "120")
         mode_var = getattr(self, "parallel_mode_var", None)
         jobs_var = getattr(self, "parallel_jobs_var", None)

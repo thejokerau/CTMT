@@ -117,6 +117,17 @@ GUI AI configuration:
   - test profile connectivity
 - GUI uses the same user-local secure preference/secret files as CLI mode.
 - AI source options include `live_all_panels` to aggregate the latest GUI live panel outputs (e.g., 4h + 12h) into one analysis input.
+
+Quote lock + local-currency ledger:
+
+- In GUI Settings:
+  - set `Primary Quote` (for example `USDT`, `USDC`, `FDUSD`)
+  - enable `Lock primary quote across crypto dashboards/trades`
+- When enabled, crypto live dashboards/backtests/trade-plan symbol normalization are aligned to the selected primary quote.
+- Ledger execution rows now carry:
+  - `quote_currency` (execution quote, e.g. `USDT`)
+  - `display_currency` (user local currency from Settings, e.g. `AUD`/`JPY`)
+  - realized `pnl_quote` and converted `pnl_display` (when quote is USD-like).
 - AI analysis prompt now requests a bottom-section implementation snippet (`Recommended API Snippet`) with duplicate-signal guard, entry/exit branches, and minimal ledger logic.
 - AI tab now supports workflow automation:
   - `Auto-stage signals` after AI response

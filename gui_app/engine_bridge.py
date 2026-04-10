@@ -1225,6 +1225,8 @@ class EngineBridge:
             note = str(event.get("note", "")).strip()
             score = str(event.get("score", "")).strip()
             is_execution = bool(event.get("is_execution", False))
+            quote_currency = str(event.get("quote_currency", "USD")).strip().upper() or "USD"
+            display_currency = str(event.get("display_currency", "USD")).strip().upper() or "USD"
             try:
                 price = float(event.get("price", 0.0) or 0.0)
             except Exception:
@@ -1271,6 +1273,8 @@ class EngineBridge:
                 "score": score,
                 "note": note,
                 "is_execution": is_execution,
+                "quote_currency": quote_currency,
+                "display_currency": display_currency,
             }
             entries.append(rec)
             if action != "HOLD" or guard_hold_signals:
@@ -1284,6 +1288,8 @@ class EngineBridge:
                     "entry_ts": rec["ts"],
                     "entry_price": price,
                     "qty": qty,
+                    "quote_currency": quote_currency,
+                    "display_currency": display_currency,
                     "asset": asset,
                     "market": market,
                     "timeframe": timeframe,
@@ -1298,6 +1304,23 @@ class EngineBridge:
                         entry_price = 0.0
                     if entry_price > 0 and price > 0:
                         rec["pnl_pct"] = round(((price - entry_price) / entry_price) * 100.0, 4)
+                        pnl_quote = (price - entry_price) * max(0.0, qty)
+                        rec["pnl_quote"] = round(float(pnl_quote), 8)
+                        rec["quote_currency"] = str(open_pos.get("quote_currency", quote_currency) or quote_currency).strip().upper() or quote_currency
+                        # Convert realized quote PnL into user's preferred display currency when quote is USD-like.
+                        usd_like = {"USD", "USDT", "USDC", "BUSD", "FDUSD", "TUSD", "USDP", "DAI"}
+                        dc = str(display_currency or "USD").strip().upper() or "USD"
+                        qc = str(rec.get("quote_currency", quote_currency)).strip().upper() or quote_currency
+                        rec["display_currency"] = dc
+                        if qc == dc:
+                            rec["pnl_display"] = round(float(pnl_quote), 8)
+                        elif qc in usd_like:
+                            try:
+                                fx = float(self.mod.get_usd_to_currency_rate(dc))
+                            except Exception:
+                                fx = 1.0
+                            rec["fx_usd_to_display"] = fx
+                            rec["pnl_display"] = round(float(pnl_quote) * fx, 8)
                     open_positions.pop(pos_key, None)
 
             ledger["entries"] = entries
