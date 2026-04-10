@@ -35,6 +35,13 @@ COUNTRY_LABELS = {
 }
 
 AI_PROVIDER_OPTIONS = ["xai", "openai", "anthropic", "ollama", "openai_compatible", "openclaw"]
+COMMON_CRYPTO_BASES = {
+    "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "TRX", "TON", "AVAX",
+    "LINK", "BCH", "DOT", "LTC", "XLM", "ATOM", "ETC", "NEAR", "APT", "ARB",
+    "OP", "UNI", "AAVE", "SUI", "PEPE", "SHIB", "MATIC", "FIL", "INJ", "KAS",
+    "HBAR", "CRO", "RUNE", "FTM", "VET", "ALGO", "ICP", "MKR", "SNX", "GRT",
+    "EGLD", "IMX", "SEI", "TIA", "JUP", "WIF", "RENDER", "TAO", "RNDR", "ZEC",
+}
 
 
 def country_display_values() -> List[str]:
@@ -1724,6 +1731,12 @@ class StrataGuiApp:
             quote_default = (self.quote_var.get().strip().upper() or "USDT")
         except Exception:
             pass
+        allowed_assets: set[str] = set()
+        for s in self._extract_signals_from_live_text((self.latest_live_output_text or "").strip()):
+            a = str(s.get("asset", "")).strip().upper()
+            if a:
+                allowed_assets.add(a)
+
         lines = text.splitlines()
         patt = re.compile(
             r"\b(BUY|SELL)\b[^A-Z0-9]{0,8}\b([A-Z][A-Z0-9]{1,11})(?:[-/ ]?(USDT|USD|BTC|ETH|BNB))?\b",
@@ -1736,6 +1749,14 @@ class StrataGuiApp:
                 continue
             side = str(m.group(1)).upper()
             base = str(m.group(2)).upper()
+            if not re.fullmatch(r"[A-Z0-9]{2,8}", base):
+                continue
+            if allowed_assets:
+                if base not in allowed_assets:
+                    continue
+            else:
+                if base not in COMMON_CRYPTO_BASES:
+                    continue
             q = str(m.group(3) or quote_default).upper()
             symbol = f"{base}{q}"
             key = (symbol, side)
@@ -1976,6 +1997,7 @@ class StrataGuiApp:
                     "action": side,
                     "qty": qty,
                     "note": f"Submitted to Binance ({symbol})",
+                    "is_execution": True,
                 },
                 cooldown_minutes=cooldown,
                 allow_duplicate=False,
@@ -2206,6 +2228,7 @@ class StrataGuiApp:
                 "price": price,
                 "qty": qty,
                 "note": note,
+                "is_execution": bool(qty > 0),
             },
             cooldown_minutes=cooldown,
             allow_duplicate=False,

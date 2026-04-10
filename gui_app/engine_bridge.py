@@ -1063,7 +1063,30 @@ class EngineBridge:
 
     def get_trade_ledger(self) -> Dict[str, Any]:
         with self._lock:
-            return {"ok": True, "ledger": load_trade_ledger()}
+            ledger = load_trade_ledger()
+            if not isinstance(ledger, dict):
+                ledger = default_trade_ledger()
+            open_positions = ledger.get("open_positions", {})
+            if not isinstance(open_positions, dict):
+                open_positions = {}
+            cleaned: Dict[str, Any] = {}
+            changed = False
+            for k, v in open_positions.items():
+                if not isinstance(k, str) or not isinstance(v, dict):
+                    changed = True
+                    continue
+                try:
+                    qty = float(v.get("qty", 0.0) or 0.0)
+                except Exception:
+                    qty = 0.0
+                if qty <= 0:
+                    changed = True
+                    continue
+                cleaned[k] = v
+            if changed:
+                ledger["open_positions"] = cleaned
+                save_trade_ledger(ledger)
+            return {"ok": True, "ledger": ledger}
 
     def record_signal_event(self, event: Dict[str, Any], cooldown_minutes: int = 240, allow_duplicate: bool = False) -> Dict[str, Any]:
         with self._lock:
@@ -1087,6 +1110,7 @@ class EngineBridge:
             panel = str(event.get("panel", "live")).strip()
             note = str(event.get("note", "")).strip()
             score = str(event.get("score", "")).strip()
+            is_execution = bool(event.get("is_execution", False))
             try:
                 price = float(event.get("price", 0.0) or 0.0)
             except Exception:
@@ -1131,13 +1155,14 @@ class EngineBridge:
                 "qty": qty,
                 "score": score,
                 "note": note,
+                "is_execution": is_execution,
             }
             entries.append(rec)
             activity_guard[guard_key] = {"ts": rec["ts"], "id": entry_id}
 
             pos_key = f"{market}|{timeframe}|{asset}"
             open_pos = open_positions.get(pos_key)
-            if action == "BUY":
+            if action == "BUY" and is_execution and qty > 0:
                 open_positions[pos_key] = {
                     "entry_id": entry_id,
                     "entry_ts": rec["ts"],
@@ -1148,7 +1173,7 @@ class EngineBridge:
                     "timeframe": timeframe,
                     "panel": panel,
                 }
-            elif action == "SELL":
+            elif action == "SELL" and is_execution:
                 if isinstance(open_pos, dict):
                     rec["closed_entry_id"] = int(open_pos.get("entry_id", 0) or 0)
                     try:

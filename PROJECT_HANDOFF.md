@@ -226,6 +226,13 @@
   - validates limit price against tick/min/max filters
   - validates notional against `MIN_NOTIONAL` / `NOTIONAL` constraints
   - normalizes qty/price to exchange-valid increments before order submission
+- Fixed signal-vs-execution ledger contamination:
+  - open positions now update only on execution-grade events with non-zero qty
+  - AI/live signal logs remain in ledger history but no longer create phantom open positions
+  - added auto-cleaning of legacy zero-qty open positions during ledger reads
+- Tightened AI recommendation parser:
+  - filters extracted assets to live-dashboard allowlist when available
+  - fallback symbol filter now constrained to known crypto base set to avoid generic word captures
 - Rebranded user-facing project naming to **STRATA**:
   - GUI window title and task-terminal header now use STRATA branding
   - nightly startup banner updated to STRATA
@@ -304,7 +311,7 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-10T07:18:14+00:00
+- Last update UTC: 2026-04-10T07:37:40+00:00
 - Latest experiment artifact: `experiments/runs/run_20260410T031732Z.json`
 - Champion scenarios tracked: 4
 - Latest run summary:

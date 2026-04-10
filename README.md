@@ -141,6 +141,10 @@ GUI Portfolio & Ledger:
     - limit-price tick size / min-max price
     - notional constraints (`MIN_NOTIONAL`/`NOTIONAL`)
     - auto-normalization (round-down to valid increment) before submit
+  - ledger open-position safety:
+    - only execution-grade events (`is_execution=true` with non-zero qty) create/close open positions
+    - signal-only entries (e.g., AI interpretation/imported signals) are kept in history but do not pollute open positions
+    - invalid legacy zero-qty open positions are auto-cleaned on ledger read
 - Binance profiles can be managed in GUI Settings (similar to AI profiles):
   - create/update/set active/delete profile
   - secure key+secret storage outside repo
