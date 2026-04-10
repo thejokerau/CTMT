@@ -210,6 +210,42 @@
   - duplicate-signal cooldown guard to avoid repeated same-signal entries
   - import live dashboard signals (`BUY/HOLD/SELL`) into guarded ledger
   - manual ledger event entry support
+- Added AI-to-execution bridge in GUI:
+  - stage BUY/SELL recommendations parsed from AI output into pending queue
+  - selective multi-row approval/submit to Binance (user confirms before submit)
+  - per-row editable quantity/order type for pending recommendations
+  - pending state tracking (`PENDING/BLOCKED/SUBMITTED/FAILED`)
+  - optional auto-stage of AI recommendations after each AI run
+  - optional AI-signal logging to ledger during staging
+  - one-click Live->AI pipeline run and interval scheduler for continuous operation
+  - parser now supports strict machine-readable trade-plan footer (`BEGIN_STRATA_TRADE_PLAN_JSON` ... `END_STRATA_TRADE_PLAN_JSON`)
+  - structured trade rows are mapped directly into pending recommendations while keeping human-readable AI narrative at top
+- Added open-order trade controls in GUI:
+  - fetch Binance open orders
+  - cancel selected open orders directly from GUI
+- Added Binance pre-submit order hardening:
+  - validates quantity against step/min/max filters
+  - validates limit price against tick/min/max filters
+  - validates notional against `MIN_NOTIONAL` / `NOTIONAL` constraints
+  - normalizes qty/price to exchange-valid increments before order submission
+- Fixed signal-vs-execution ledger contamination:
+  - open positions now update only on execution-grade events with non-zero qty
+  - AI/live signal logs remain in ledger history but no longer create phantom open positions
+  - added auto-cleaning of legacy zero-qty open positions during ledger reads
+- Tightened AI recommendation parser:
+  - filters extracted assets to live-dashboard allowlist when available
+  - fallback symbol filter now constrained to known crypto base set to avoid generic word captures
+- Rebranded user-facing project naming to **STRATA**:
+  - GUI window title and task-terminal header now use STRATA branding
+  - nightly startup banner updated to STRATA
+  - docs and scheduler examples updated to STRATA naming
+  - added `STRATA_DISABLE_EMOJI` env override support (legacy `CTMT_DISABLE_EMOJI` retained)
+- Moved dashboard preset workflow into Live Dashboard tab:
+  - save/update from selected panels
+  - save/update from all panels
+  - load single profile (replace)
+  - merge multiple profiles (append)
+  - delete selected profiles
 - Updated AI dashboard prompt contract:
   - AI outputs are now instructed to include a final `Recommended API Snippet` Python section aligned to recommendations
 
@@ -277,7 +313,7 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-10T04:21:29+00:00
+- Last update UTC: 2026-04-10T07:53:28+00:00
 - Latest experiment artifact: `experiments/runs/run_20260410T031732Z.json`
 - Champion scenarios tracked: 4
 - Latest run summary:

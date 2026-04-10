@@ -92,9 +92,20 @@ GUI task execution:
   - queued task reprioritization (move up/down)
   - terminal-style live log pane for task start/completion and captured backend output
 
+Live Dashboard preset management:
+
+- Preset/profile controls are available directly in the `Live Dashboard` tab.
+- Supports:
+  - save/update profile from selected panel(s)
+  - save/update profile from all current panels
+  - load single profile (replace current panels)
+  - merge multiple selected profiles (append)
+  - delete multiple selected profiles
+
 GUI dashboard readability:
 
 - Live/Backtest text outputs now apply color highlighting for key sections and action states (`BUY/HOLD/SELL`) to improve scanability.
+- Major GUI tabs now support both vertical and horizontal scrolling at tab level, improving access to full config/action areas on smaller screens.
 
 GUI AI configuration:
 
@@ -107,6 +118,17 @@ GUI AI configuration:
 - GUI uses the same user-local secure preference/secret files as CLI mode.
 - AI source options include `live_all_panels` to aggregate the latest GUI live panel outputs (e.g., 4h + 12h) into one analysis input.
 - AI analysis prompt now requests a bottom-section implementation snippet (`Recommended API Snippet`) with duplicate-signal guard, entry/exit branches, and minimal ledger logic.
+- AI tab now supports workflow automation:
+  - `Auto-stage signals` after AI response
+  - optional `Log AI signals to ledger`
+  - `Run Live->AI Pipeline` (run dashboards, then AI on combined panel outputs)
+  - pipeline scheduler (interval in minutes) for continuous operation during runtime
+  - AI output contract now supports dual format:
+    - human-readable interpretation at top
+    - machine-readable footer between:
+      - `BEGIN_STRATA_TRADE_PLAN_JSON`
+      - `END_STRATA_TRADE_PLAN_JSON`
+    - structured trades from this footer are parsed directly into pending recommendations for Portfolio/Ledger workflow
 
 GUI Portfolio & Ledger:
 
@@ -116,6 +138,19 @@ GUI Portfolio & Ledger:
   - Duplicate-signal activity guard (cooldown-based) to reduce repeated same-signal actions
   - Manual ledger event entry (`BUY/SELL/HOLD`)
   - Current open-position tracking + historical ledger view
+  - AI recommendation staging queue with selective approval/submit flow
+  - direct import of AI-interpreted signals into pending queue (with optional ledger logging)
+  - open Binance order list + cancel selected orders from GUI
+  - execution modes: `manual`, `semi_auto`, `full_auto` (mode-controlled behavior)
+  - Binance pre-submit order validation against exchange filters:
+    - quantity step size / min-max qty
+    - limit-price tick size / min-max price
+    - notional constraints (`MIN_NOTIONAL`/`NOTIONAL`)
+    - auto-normalization (round-down to valid increment) before submit
+  - ledger open-position safety:
+    - only execution-grade events (`is_execution=true` with non-zero qty) create/close open positions
+    - signal-only entries (e.g., AI interpretation/imported signals) are kept in history but do not pollute open positions
+    - invalid legacy zero-qty open positions are auto-cleaned on ledger read
 - Binance profiles can be managed in GUI Settings (similar to AI profiles):
   - create/update/set active/delete profile
   - secure key+secret storage outside repo
@@ -167,7 +202,7 @@ GUI traditional-region UX:
 - Action-label UI fallback:
   - auto-detects terminal support for emoji and ANSI color
   - falls back to plain text labels if unsupported
-  - optional env override: `CTMT_DISABLE_EMOJI=1`
+  - optional env override: `STRATA_DISABLE_EMOJI=1` (legacy `CTMT_DISABLE_EMOJI=1` also supported)
   - optional color controls: `NO_COLOR=1` or `FORCE_COLOR=1`
 - Built-in AI analysis mode:
   - paste full raw dashboard text and generate a Grok-ready analysis prompt
@@ -212,7 +247,7 @@ python scripts/auto_research_cycle.py
 Windows Task Scheduler helper:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\register_research_task.ps1 -TaskName CTMT_Nightly_Research -Time 02:00 -PythonExe python
+powershell -ExecutionPolicy Bypass -File .\scripts\register_research_task.ps1 -TaskName STRATA_Nightly_Research -Time 02:00 -PythonExe python
 ```
 
 Promotion gates (`scripts/promote_champion.py`) are conservative by default:

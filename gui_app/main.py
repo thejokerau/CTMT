@@ -3,6 +3,7 @@ import tkinter as tk
 from collections import deque
 from dataclasses import dataclass, asdict
 from datetime import datetime
+import json
 from pathlib import Path
 import re
 from tkinter import ttk, messagebox, filedialog
@@ -35,6 +36,13 @@ COUNTRY_LABELS = {
 }
 
 AI_PROVIDER_OPTIONS = ["xai", "openai", "anthropic", "ollama", "openai_compatible", "openclaw"]
+COMMON_CRYPTO_BASES = {
+    "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "TRX", "TON", "AVAX",
+    "LINK", "BCH", "DOT", "LTC", "XLM", "ATOM", "ETC", "NEAR", "APT", "ARB",
+    "OP", "UNI", "AAVE", "SUI", "PEPE", "SHIB", "MATIC", "FIL", "INJ", "KAS",
+    "HBAR", "CRO", "RUNE", "FTM", "VET", "ALGO", "ICP", "MKR", "SNX", "GRT",
+    "EGLD", "IMX", "SEI", "TIA", "JUP", "WIF", "RENDER", "TAO", "RNDR", "ZEC",
+}
 
 
 def country_display_values() -> List[str]:
@@ -66,11 +74,11 @@ def parse_country_code(display_or_code: str, manual_code: str = "") -> str:
     return "2"
 
 
-class CTMTGuiApp:
+class StrataGuiApp:
     def __init__(self, root: tk.Tk, repo_root: Path) -> None:
         self.root = root
         self.repo_root = repo_root
-        self.root.title("CTMT GUI (gui-nightly)")
+        self.root.title("STRATA GUI (gui-nightly)")
         self.root.geometry("1400x900")
 
         self.state = load_state()
@@ -95,6 +103,9 @@ class CTMTGuiApp:
         self._ai_profiles_cache: Dict[str, Dict[str, Any]] = {}
         self._binance_profiles_cache: Dict[str, Dict[str, Any]] = {}
         self.latest_portfolio_snapshot: Dict[str, Any] = {}
+        self.pending_recommendations: List[Dict[str, Any]] = []
+        self._pending_rec_seq = 0
+        self.pipeline_job: Optional[str] = None
 
         self.live_panels: List[LivePanelConfig] = []
         for p in self.state.get("live_panels", []):
@@ -108,28 +119,16 @@ class CTMTGuiApp:
         self._update_run_controls_and_status()
 
     def _build_ui(self) -> None:
-        topbar = ttk.Frame(self.root, padding=(8, 4))
-        topbar.pack(side="top", fill="x")
-        ttk.Button(topbar, text="Tasks", command=self._open_task_monitor_tab).pack(side="right")
-
         self.nb = ttk.Notebook(self.root)
         self.nb.pack(fill="both", expand=True)
-
-        self.live_tab = ttk.Frame(self.nb)
-        self.backtest_tab = ttk.Frame(self.nb)
-        self.ai_tab = ttk.Frame(self.nb)
-        self.portfolio_tab = ttk.Frame(self.nb)
-        self.research_tab = ttk.Frame(self.nb)
-        self.task_tab = ttk.Frame(self.nb)
-        self.settings_tab = ttk.Frame(self.nb)
-
-        self.nb.add(self.live_tab, text="Live Dashboard")
-        self.nb.add(self.backtest_tab, text="Backtest")
-        self.nb.add(self.ai_tab, text="AI Analysis")
-        self.nb.add(self.portfolio_tab, text="Portfolio & Ledger")
-        self.nb.add(self.research_tab, text="Auto-Research")
-        self.nb.add(self.task_tab, text="Task Monitor")
-        self.nb.add(self.settings_tab, text="Settings")
+        self._tab_scroll_canvases: Dict[str, tk.Canvas] = {}
+        self.live_tab = self._create_scrollable_tab("Live Dashboard", "live")
+        self.backtest_tab = self._create_scrollable_tab("Backtest", "backtest")
+        self.ai_tab = self._create_scrollable_tab("AI Analysis", "ai")
+        self.portfolio_tab = self._create_scrollable_tab("Portfolio & Ledger", "portfolio")
+        self.research_tab = self._create_scrollable_tab("Auto-Research", "research")
+        self.task_tab = self._create_scrollable_tab("Task Monitor", "task")
+        self.settings_tab = self._create_scrollable_tab("Settings", "settings")
 
         self._build_live_tab()
         self._build_backtest_tab()
@@ -139,6 +138,40 @@ class CTMTGuiApp:
         self._build_task_tab()
         self._build_settings_tab()
         self._build_status_bar()
+
+    def _create_scrollable_tab(self, title: str, key: str) -> ttk.Frame:
+        container = ttk.Frame(self.nb)
+        canvas = tk.Canvas(container, highlightthickness=0)
+        ybar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        xbar = ttk.Scrollbar(container, orient="horizontal", command=canvas.xview)
+        canvas.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        inner = ttk.Frame(canvas)
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _sync_scrollregion(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_resize(event):
+            try:
+                req_w = inner.winfo_reqwidth()
+            except Exception:
+                req_w = event.width
+            target_w = event.width if req_w <= event.width else req_w
+            canvas.itemconfigure(window_id, width=target_w)
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        inner.bind("<Configure>", _sync_scrollregion)
+        canvas.bind("<Configure>", _on_canvas_resize)
+
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        ybar.grid(row=0, column=1, sticky="ns")
+        xbar.grid(row=1, column=0, sticky="ew")
+
+        self.nb.add(container, text=title)
+        self._tab_scroll_canvases[key] = canvas
+        return inner
 
     def _build_status_bar(self) -> None:
         bar = ttk.Frame(self.root, padding=(8, 4))
@@ -157,7 +190,7 @@ class CTMTGuiApp:
         right.pack(side="left", fill="both", expand=True)
 
         ttk.Label(left, text="Panels").pack(anchor="w")
-        self.panel_list = tk.Listbox(left, width=40, height=18)
+        self.panel_list = tk.Listbox(left, width=40, height=18, selectmode="extended")
         self.panel_list.pack(fill="y", pady=(4, 8))
         self.panel_list.bind("<<ListboxSelect>>", lambda e: self._load_selected_panel_to_form())
 
@@ -203,8 +236,22 @@ class CTMTGuiApp:
         ttk.Button(auto, text="Start Auto", command=self._start_auto_refresh).pack(fill="x")
         ttk.Button(auto, text="Stop Auto", command=self._stop_auto_refresh).pack(fill="x", pady=2)
 
-        self.live_output = tk.Text(right, wrap="none")
-        self.live_output.pack(fill="both", expand=True)
+        presets = ttk.LabelFrame(left, text="Dashboard Presets", padding=8)
+        presets.pack(fill="x", pady=8)
+        self.live_profile_name_var = tk.StringVar(value="default")
+        self._labeled_entry(presets, "Profile Name", self.live_profile_name_var)
+        ttk.Button(presets, text="Save/Update from Selected Panels", command=self._save_live_profile_from_selected).pack(fill="x", pady=2)
+        ttk.Button(presets, text="Save/Update from All Panels", command=self._save_live_profile_from_all).pack(fill="x", pady=2)
+        ttk.Label(presets, text="Saved Profiles (multi-select)").pack(anchor="w", pady=(6, 2))
+        self.live_profile_list = tk.Listbox(presets, height=5, selectmode="extended")
+        self.live_profile_list.pack(fill="x")
+        ttk.Button(presets, text="Load Selected Profile (Replace)", command=self._load_selected_profile_replace).pack(fill="x", pady=2)
+        ttk.Button(presets, text="Merge Selected Profiles (Append)", command=self._merge_selected_profiles).pack(fill="x", pady=2)
+        ttk.Button(presets, text="Delete Selected Profiles", command=self._delete_selected_profiles).pack(fill="x", pady=2)
+        self._refresh_saved_profile_list()
+
+        live_frame, self.live_output = self._create_scrolled_text(right, wrap="none")
+        live_frame.pack(fill="both", expand=True)
         self._configure_dashboard_tags(self.live_output)
 
     def _build_backtest_tab(self) -> None:
@@ -280,11 +327,11 @@ class CTMTGuiApp:
         self.btn_run_backtest = ttk.Button(top, text="Run Backtest", command=self._run_backtest)
         self.btn_run_backtest.pack(side="left", padx=8)
 
-        self.bt_summary = tk.Text(out, height=10, wrap="word")
-        self.bt_summary.pack(fill="x")
+        bt_summary_frame, self.bt_summary = self._create_scrolled_text(out, height=10, wrap="none")
+        bt_summary_frame.pack(fill="x")
         self._configure_dashboard_tags(self.bt_summary)
-        self.bt_trades = tk.Text(out, wrap="none")
-        self.bt_trades.pack(fill="both", expand=True, pady=(8, 0))
+        bt_trades_frame, self.bt_trades = self._create_scrolled_text(out, wrap="none")
+        bt_trades_frame.pack(fill="both", expand=True, pady=(8, 0))
         self._configure_dashboard_tags(self.bt_trades)
 
     def _build_ai_tab(self) -> None:
@@ -297,6 +344,9 @@ class CTMTGuiApp:
         self.ai_datetime = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         self.ai_prompt_mode = tk.StringVar(value="preset_dashboard")
         self.ai_require_confirm = tk.BooleanVar(value=True)
+        self.ai_auto_stage_var = tk.BooleanVar(value=True)
+        self.ai_log_signals_var = tk.BooleanVar(value=True)
+        self.pipeline_interval_min_var = tk.StringVar(value="30")
         self.ai_backtest_path = tk.StringVar(
             value=str(self.repo_root / "experiments" / "backtest_snapshots" / "latest_backtest.txt")
         )
@@ -319,28 +369,37 @@ class CTMTGuiApp:
             state="readonly",
         ).pack(side="left", padx=4)
         ttk.Checkbutton(top, text="Confirm before send", variable=self.ai_require_confirm).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(top, text="Auto-stage signals", variable=self.ai_auto_stage_var).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(top, text="Log AI signals to ledger", variable=self.ai_log_signals_var).pack(side="left", padx=(6, 0))
         self.btn_run_ai = ttk.Button(top, text="Run AI Analysis", command=self._run_ai_analysis)
         self.btn_run_ai.pack(side="left", padx=8)
         ttk.Button(top, text="Preview Prompt", command=self._preview_ai_prompt).pack(side="left")
+        ttk.Button(top, text="Stage Recommendations", command=self._stage_ai_recommendations).pack(side="left", padx=6)
+        ttk.Button(top, text="Clear Pending", command=self._clear_pending_recommendations).pack(side="left")
+        ttk.Label(top, text="Pipeline min").pack(side="left", padx=(10, 0))
+        ttk.Entry(top, textvariable=self.pipeline_interval_min_var, width=6).pack(side="left", padx=4)
+        ttk.Button(top, text="Run Live->AI Pipeline", command=self._run_live_ai_pipeline_now).pack(side="left", padx=4)
+        ttk.Button(top, text="Start Pipeline Scheduler", command=self._start_pipeline_scheduler).pack(side="left", padx=4)
+        ttk.Button(top, text="Stop Scheduler", command=self._stop_pipeline_scheduler).pack(side="left", padx=4)
 
-        self.ai_input = tk.Text(body, height=10, wrap="word")
-        self.ai_input.pack(fill="x")
+        ai_input_frame, self.ai_input = self._create_scrolled_text(body, height=10, wrap="none")
+        ai_input_frame.pack(fill="x")
         ai_file_row = ttk.Frame(body)
         ai_file_row.pack(fill="x", pady=(6, 0))
         ttk.Label(ai_file_row, text="Backtest file").pack(side="left")
         ttk.Entry(ai_file_row, textvariable=self.ai_backtest_path, width=90).pack(side="left", padx=6, fill="x", expand=True)
         ttk.Button(ai_file_row, text="Browse...", command=self._browse_ai_backtest_file).pack(side="left")
         ttk.Label(body, text="Custom prompt (used when Prompt=custom_prompt)").pack(anchor="w", pady=(8, 0))
-        self.ai_custom_prompt = tk.Text(body, height=8, wrap="word")
-        self.ai_custom_prompt.pack(fill="x")
+        ai_custom_frame, self.ai_custom_prompt = self._create_scrolled_text(body, height=8, wrap="none")
+        ai_custom_frame.pack(fill="x")
         follow_row = ttk.Frame(body)
         follow_row.pack(fill="x", pady=(8, 0))
         self.ai_followup_var = tk.StringVar(value="")
         ttk.Label(follow_row, text="Follow-up").pack(side="left")
         ttk.Entry(follow_row, textvariable=self.ai_followup_var, width=100).pack(side="left", padx=6, fill="x", expand=True)
         ttk.Button(follow_row, text="Send Follow-up", command=self._run_ai_followup).pack(side="left")
-        self.ai_output = tk.Text(body, wrap="word")
-        self.ai_output.pack(fill="both", expand=True, pady=(8, 0))
+        ai_output_frame, self.ai_output = self._create_scrolled_text(body, wrap="none")
+        ai_output_frame.pack(fill="both", expand=True, pady=(8, 0))
 
     def _build_portfolio_tab(self) -> None:
         top = ttk.Frame(self.portfolio_tab, padding=8)
@@ -349,6 +408,8 @@ class CTMTGuiApp:
         body.pack(fill="both", expand=True)
 
         self.pf_binance_profile_var = tk.StringVar(value="")
+        self.pf_exec_mode_var = tk.StringVar(value="semi_auto")
+        self.pf_quote_var = tk.StringVar(value="USDT")
         self.pf_cooldown_min_var = tk.StringVar(value="240")
         self.pf_track_hold_var = tk.BooleanVar(value=True)
         self.pf_manual_asset_var = tk.StringVar(value="")
@@ -357,10 +418,16 @@ class CTMTGuiApp:
         self.pf_manual_qty_var = tk.StringVar(value="")
         self.pf_manual_tf_var = tk.StringVar(value="1d")
         self.pf_manual_note_var = tk.StringVar(value="")
+        self.pf_pending_qty_var = tk.StringVar(value="0")
+        self.pf_pending_type_var = tk.StringVar(value="MARKET")
 
         ttk.Label(top, text="Binance Profile").pack(side="left")
         self.pf_binance_profile_combo = ttk.Combobox(top, textvariable=self.pf_binance_profile_var, values=[], width=22, state="readonly")
         self.pf_binance_profile_combo.pack(side="left", padx=4)
+        ttk.Label(top, text="Mode").pack(side="left")
+        ttk.Combobox(top, textvariable=self.pf_exec_mode_var, values=["manual", "semi_auto", "full_auto"], width=10, state="readonly").pack(side="left", padx=4)
+        ttk.Label(top, text="Quote").pack(side="left")
+        ttk.Combobox(top, textvariable=self.pf_quote_var, values=["USDT", "USD", "BTC", "ETH", "BNB"], width=8, state="readonly").pack(side="left", padx=4)
         ttk.Button(top, text="Refresh Profiles", command=self._refresh_binance_profiles).pack(side="left", padx=(4, 8))
         ttk.Button(top, text="Refresh Portfolio", command=self._refresh_portfolio).pack(side="left")
         ttk.Label(top, text="Signal Cooldown (min)").pack(side="left", padx=(12, 0))
@@ -368,6 +435,42 @@ class CTMTGuiApp:
         ttk.Checkbutton(top, text="Track HOLD signals", variable=self.pf_track_hold_var).pack(side="left", padx=(8, 0))
         ttk.Button(top, text="Import Signals from Live", command=self._import_signals_from_live).pack(side="left", padx=8)
         ttk.Button(top, text="Refresh Ledger", command=self._refresh_ledger_view).pack(side="left")
+
+        pending_frame = ttk.LabelFrame(self.portfolio_tab, text="Pending Recommendations (Review & Approve)", padding=8)
+        pending_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        pending_tree_frame, self.pending_tree = self._create_scrolled_tree(
+            pending_frame,
+            columns=("id", "symbol", "side", "type", "qty", "tf", "conf", "status", "reason"),
+            show="headings",
+            height=6,
+            selectmode="extended",
+        )
+        for c, w in [
+            ("id", 46),
+            ("symbol", 90),
+            ("side", 60),
+            ("type", 70),
+            ("qty", 80),
+            ("tf", 50),
+            ("conf", 60),
+            ("status", 90),
+            ("reason", 520),
+        ]:
+            self.pending_tree.heading(c, text=c.upper())
+            self.pending_tree.column(c, width=w, anchor="w")
+        pending_tree_frame.pack(fill="x", expand=False)
+        pending_btns_row1 = ttk.Frame(pending_frame)
+        pending_btns_row1.pack(fill="x", pady=(6, 2))
+        ttk.Label(pending_btns_row1, text="Set qty").pack(side="left")
+        ttk.Entry(pending_btns_row1, textvariable=self.pf_pending_qty_var, width=10).pack(side="left", padx=4)
+        ttk.Label(pending_btns_row1, text="type").pack(side="left")
+        ttk.Combobox(pending_btns_row1, textvariable=self.pf_pending_type_var, values=["MARKET", "LIMIT"], width=8, state="readonly").pack(side="left", padx=4)
+        ttk.Button(pending_btns_row1, text="Apply to Selected", command=self._apply_pending_edit_to_selected).pack(side="left", padx=6)
+        pending_btns_row2 = ttk.Frame(pending_frame)
+        pending_btns_row2.pack(fill="x")
+        ttk.Button(pending_btns_row2, text="Submit Selected", command=self._submit_selected_pending_orders).pack(side="left")
+        ttk.Button(pending_btns_row2, text="Remove Selected", command=self._remove_selected_pending_orders).pack(side="left", padx=6)
+        ttk.Button(pending_btns_row2, text="Clear All", command=self._clear_pending_recommendations).pack(side="left")
 
         manual = ttk.LabelFrame(self.portfolio_tab, text="Manual Ledger Event", padding=8)
         manual.pack(fill="x", padx=8, pady=(0, 8))
@@ -379,6 +482,36 @@ class CTMTGuiApp:
         self._labeled_entry(manual, "Note", self.pf_manual_note_var)
         ttk.Button(manual, text="Add Manual Event", command=self._add_manual_ledger_event).pack(fill="x", pady=(6, 0))
 
+        orders = ttk.LabelFrame(self.portfolio_tab, text="Open Binance Orders (Cancel via GUI)", padding=8)
+        orders.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        order_top = ttk.Frame(orders)
+        order_top.pack(fill="x")
+        self.pf_open_symbol_filter_var = tk.StringVar(value="")
+        ttk.Label(order_top, text="Symbol filter").pack(side="left")
+        ttk.Entry(order_top, textvariable=self.pf_open_symbol_filter_var, width=14).pack(side="left", padx=4)
+        ttk.Button(order_top, text="Refresh Open Orders", command=self._refresh_open_orders).pack(side="left")
+        ttk.Button(order_top, text="Cancel Selected", command=self._cancel_selected_open_orders).pack(side="left", padx=6)
+        open_orders_frame, self.open_orders_tree = self._create_scrolled_tree(
+            orders,
+            columns=("symbol", "orderId", "side", "type", "status", "price", "origQty", "executedQty"),
+            show="headings",
+            height=6,
+            selectmode="extended",
+        )
+        for c, w in [
+            ("symbol", 90),
+            ("orderId", 100),
+            ("side", 60),
+            ("type", 70),
+            ("status", 90),
+            ("price", 100),
+            ("origQty", 90),
+            ("executedQty", 100),
+        ]:
+            self.open_orders_tree.heading(c, text=c)
+            self.open_orders_tree.column(c, width=w, anchor="w")
+        open_orders_frame.pack(fill="x", expand=False, pady=(6, 0))
+
         cols = ttk.Frame(body)
         cols.pack(fill="both", expand=True)
         left = ttk.LabelFrame(cols, text="Current Portfolio (Binance)", padding=6)
@@ -386,22 +519,23 @@ class CTMTGuiApp:
         left.pack(side="left", fill="both", expand=True, padx=(0, 6))
         right.pack(side="left", fill="both", expand=True)
 
-        self.pf_portfolio_text = tk.Text(left, wrap="none")
-        self.pf_portfolio_text.pack(fill="both", expand=True)
+        pf_portfolio_frame, self.pf_portfolio_text = self._create_scrolled_text(left, wrap="none")
+        pf_portfolio_frame.pack(fill="both", expand=True)
         self._configure_dashboard_tags(self.pf_portfolio_text)
 
-        self.pf_open_positions_text = tk.Text(right, wrap="none")
-        self.pf_open_positions_text.pack(fill="both", expand=True)
+        pf_open_frame, self.pf_open_positions_text = self._create_scrolled_text(right, wrap="none")
+        pf_open_frame.pack(fill="both", expand=True)
         self._configure_dashboard_tags(self.pf_open_positions_text)
 
         bottom = ttk.LabelFrame(body, text="Trade Ledger (History + Activity Guard)", padding=6)
         bottom.pack(fill="both", expand=True, pady=(8, 0))
-        self.pf_ledger_text = tk.Text(bottom, wrap="none")
-        self.pf_ledger_text.pack(fill="both", expand=True)
+        pf_ledger_frame, self.pf_ledger_text = self._create_scrolled_text(bottom, wrap="none")
+        pf_ledger_frame.pack(fill="both", expand=True)
         self._configure_dashboard_tags(self.pf_ledger_text)
 
         self._refresh_binance_profiles()
         self._refresh_ledger_view()
+        self._refresh_pending_recommendations_view()
 
     def _build_research_tab(self) -> None:
         top = ttk.Frame(self.research_tab, padding=8)
@@ -431,8 +565,8 @@ class CTMTGuiApp:
         self.btn_run_research_comp = ttk.Button(top, text="Run Comprehensive", command=self._run_comprehensive_research)
         self.btn_run_research_comp.pack(side="left")
 
-        self.rs_output = tk.Text(self.research_tab, wrap="word")
-        self.rs_output.pack(fill="both", expand=True, padx=8, pady=8)
+        rs_frame, self.rs_output = self._create_scrolled_text(self.research_tab, wrap="none")
+        rs_frame.pack(fill="both", expand=True, padx=8, pady=8)
 
     def _build_task_tab(self) -> None:
         top = ttk.Frame(self.task_tab, padding=8)
@@ -459,9 +593,9 @@ class CTMTGuiApp:
         self.queued_list = tk.Listbox(right, height=12)
         self.queued_list.pack(fill="both", expand=True)
 
-        self.task_tab_output = tk.Text(body, height=4, wrap="word")
-        self.task_tab_output.pack(fill="x", pady=(8, 0))
-        self.task_terminal = tk.Text(
+        task_out_frame, self.task_tab_output = self._create_scrolled_text(body, height=4, wrap="none")
+        task_out_frame.pack(fill="x", pady=(8, 0))
+        task_term_frame, self.task_terminal = self._create_scrolled_text(
             body,
             height=12,
             wrap="none",
@@ -469,8 +603,8 @@ class CTMTGuiApp:
             fg="#9CF5C6",
             insertbackground="#9CF5C6",
         )
-        self.task_terminal.pack(fill="both", expand=True, pady=(6, 0))
-        self.task_terminal.insert("1.0", "CTMT Task Terminal\n")
+        task_term_frame.pack(fill="both", expand=True, pady=(6, 0))
+        self.task_terminal.insert("1.0", "STRATA Task Terminal\n")
         self._refresh_task_tab()
         self._schedule_task_tab_refresh()
 
@@ -489,14 +623,6 @@ class CTMTGuiApp:
             command=lambda: self._update_run_controls_and_status(),
         ).pack(anchor="w", pady=(8, 2))
         self._labeled_entry(frame, "Max parallel jobs", self.parallel_jobs_var)
-
-        dash_frame = ttk.LabelFrame(frame, text="User Dashboard Profiles", padding=8)
-        dash_frame.pack(fill="x", pady=8)
-        self.dashboard_name_var = tk.StringVar(value="default")
-        self._labeled_entry(dash_frame, "Profile Name", self.dashboard_name_var)
-        ttk.Button(dash_frame, text="Save Current Live Panels", command=self._save_dashboard_profile).pack(fill="x", pady=2)
-        ttk.Button(dash_frame, text="Load Profile", command=self._load_dashboard_profile).pack(fill="x", pady=2)
-        ttk.Button(dash_frame, text="Delete Profile", command=self._delete_dashboard_profile).pack(fill="x", pady=2)
 
         ai_frame = ttk.LabelFrame(frame, text="AI Profiles", padding=8)
         ai_frame.pack(fill="x", pady=8)
@@ -563,8 +689,8 @@ class CTMTGuiApp:
 
         ttk.Button(frame, text="Save Settings", command=self._persist_state).pack(fill="x")
 
-        self.settings_output = tk.Text(frame, height=8, wrap="word")
-        self.settings_output.pack(fill="both", expand=True, pady=(8, 0))
+        settings_frame, self.settings_output = self._create_scrolled_text(frame, height=8, wrap="none")
+        settings_frame.pack(fill="both", expand=True, pady=(8, 0))
         self._append_settings("Settings are stored under %USERPROFILE%\\.ctmt\\gui\\gui_state.json")
         self.ai_profile_combo.bind("<<ComboboxSelected>>", lambda _e: self._load_ai_profile_into_form())
         self.bn_profile_combo.bind("<<ComboboxSelected>>", lambda _e: self._load_binance_profile_into_form())
@@ -576,6 +702,32 @@ class CTMTGuiApp:
         row.pack(fill="x", pady=2)
         ttk.Label(row, text=label, width=16).pack(side="left")
         ttk.Entry(row, textvariable=var, width=18).pack(side="left")
+
+    def _create_scrolled_text(self, parent, **text_kwargs):
+        frame = ttk.Frame(parent)
+        text = tk.Text(frame, **text_kwargs)
+        ybar = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
+        xbar = ttk.Scrollbar(frame, orient="horizontal", command=text.xview)
+        text.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        text.grid(row=0, column=0, sticky="nsew")
+        ybar.grid(row=0, column=1, sticky="ns")
+        xbar.grid(row=1, column=0, sticky="ew")
+        return frame, text
+
+    def _create_scrolled_tree(self, parent, **tree_kwargs):
+        frame = ttk.Frame(parent)
+        tree = ttk.Treeview(frame, **tree_kwargs)
+        ybar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        xbar = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        tree.grid(row=0, column=0, sticky="nsew")
+        ybar.grid(row=0, column=1, sticky="ns")
+        xbar.grid(row=1, column=0, sticky="ew")
+        return frame, tree
 
     def _configure_dashboard_tags(self, widget: tk.Text) -> None:
         # Section/header emphasis
@@ -670,6 +822,131 @@ class CTMTGuiApp:
         if not sel:
             return None
         return int(sel[0])
+
+    def _selected_panel_indices(self) -> List[int]:
+        sel = list(self.panel_list.curselection())
+        if not sel:
+            return []
+        out: List[int] = []
+        for i in sel:
+            ii = int(i)
+            if 0 <= ii < len(self.live_panels):
+                out.append(ii)
+        return out
+
+    def _refresh_saved_profile_list(self) -> None:
+        if not hasattr(self, "live_profile_list"):
+            return
+        self.live_profile_list.delete(0, tk.END)
+        dashboards = self.state.get("saved_dashboards", {})
+        if not isinstance(dashboards, dict):
+            dashboards = {}
+        for name in sorted(dashboards.keys()):
+            self.live_profile_list.insert(tk.END, name)
+
+    def _selected_profile_names(self) -> List[str]:
+        if not hasattr(self, "live_profile_list"):
+            return []
+        sel = list(self.live_profile_list.curselection())
+        names: List[str] = []
+        for i in sel:
+            try:
+                names.append(str(self.live_profile_list.get(i)))
+            except Exception:
+                continue
+        return names
+
+    def _save_live_profile_from_selected(self) -> None:
+        name = (self.live_profile_name_var.get().strip() if hasattr(self, "live_profile_name_var") else "") or "default"
+        indices = self._selected_panel_indices()
+        if not indices:
+            messagebox.showinfo("Dashboard Presets", "Select one or more panels first.")
+            return
+        dashboards = self.state.get("saved_dashboards", {})
+        if not isinstance(dashboards, dict):
+            dashboards = {}
+        dashboards[name] = [asdict(self.live_panels[i]) for i in indices]
+        self.state["saved_dashboards"] = dashboards
+        self._persist_state()
+        self._refresh_saved_profile_list()
+        self._append_task_terminal(f"Saved dashboard profile `{name}` from {len(indices)} selected panel(s).")
+
+    def _save_live_profile_from_all(self) -> None:
+        name = (self.live_profile_name_var.get().strip() if hasattr(self, "live_profile_name_var") else "") or "default"
+        dashboards = self.state.get("saved_dashboards", {})
+        if not isinstance(dashboards, dict):
+            dashboards = {}
+        dashboards[name] = [asdict(p) for p in self.live_panels]
+        self.state["saved_dashboards"] = dashboards
+        self._persist_state()
+        self._refresh_saved_profile_list()
+        self._append_task_terminal(f"Saved dashboard profile `{name}` from all panels ({len(self.live_panels)}).")
+
+    def _load_selected_profile_replace(self) -> None:
+        names = self._selected_profile_names()
+        if not names:
+            messagebox.showinfo("Dashboard Presets", "Select one profile to load.")
+            return
+        if len(names) > 1:
+            messagebox.showinfo("Dashboard Presets", "Select only one profile for replace-load.")
+            return
+        dashboards = self.state.get("saved_dashboards", {})
+        if not isinstance(dashboards, dict) or names[0] not in dashboards:
+            messagebox.showerror("Dashboard Presets", f"Profile not found: {names[0]}")
+            return
+        panels = dashboards.get(names[0], [])
+        if not isinstance(panels, list) or not panels:
+            messagebox.showerror("Dashboard Presets", f"Profile is empty: {names[0]}")
+            return
+        self.live_panels = [LivePanelConfig(**p) for p in panels if isinstance(p, dict)]
+        self._refresh_panel_list()
+        self._persist_state()
+        self._append_task_terminal(f"Loaded dashboard profile `{names[0]}` (replace).")
+
+    def _merge_selected_profiles(self) -> None:
+        names = self._selected_profile_names()
+        if not names:
+            messagebox.showinfo("Dashboard Presets", "Select one or more profiles to merge.")
+            return
+        dashboards = self.state.get("saved_dashboards", {})
+        if not isinstance(dashboards, dict):
+            dashboards = {}
+        merged: List[LivePanelConfig] = []
+        for n in names:
+            panels = dashboards.get(n, [])
+            if not isinstance(panels, list):
+                continue
+            for p in panels:
+                if isinstance(p, dict):
+                    try:
+                        merged.append(LivePanelConfig(**p))
+                    except Exception:
+                        continue
+        if not merged:
+            messagebox.showerror("Dashboard Presets", "No panels found to merge from selected profiles.")
+            return
+        self.live_panels.extend(merged)
+        self._refresh_panel_list()
+        self._persist_state()
+        self._append_task_terminal(f"Merged {len(names)} profile(s), appended {len(merged)} panel(s).")
+
+    def _delete_selected_profiles(self) -> None:
+        names = self._selected_profile_names()
+        if not names:
+            messagebox.showinfo("Dashboard Presets", "Select one or more profiles to delete.")
+            return
+        ok = messagebox.askyesno("Dashboard Presets", f"Delete {len(names)} selected profile(s)?")
+        if not ok:
+            return
+        dashboards = self.state.get("saved_dashboards", {})
+        if not isinstance(dashboards, dict):
+            dashboards = {}
+        for n in names:
+            dashboards.pop(n, None)
+        self.state["saved_dashboards"] = dashboards
+        self._persist_state()
+        self._refresh_saved_profile_list()
+        self._append_task_terminal(f"Deleted {len(names)} dashboard profile(s).")
 
     def _load_selected_panel_to_form(self) -> None:
         idx = self._selected_panel_index()
@@ -818,8 +1095,8 @@ class CTMTGuiApp:
         win.title("Task Monitor")
         win.geometry("640x360")
         self.task_monitor_window = win
-        text = tk.Text(win, wrap="word")
-        text.pack(fill="both", expand=True, padx=8, pady=8)
+        text_frame, text = self._create_scrolled_text(win, wrap="none")
+        text_frame.pack(fill="both", expand=True, padx=8, pady=8)
         self.task_monitor_text = text
 
         btn_row = ttk.Frame(win)
@@ -1018,7 +1295,7 @@ class CTMTGuiApp:
         task_name = "Live Dashboard (All Panels)"
         task_id = self._set_busy(True, task_name)
         self._append_task_terminal("START Live Dashboard (All Panels)")
-        self.live_output.delete("1.0", tk.END)
+        # Keep prior dashboard visible while refresh runs; replace only on completion.
 
         def worker():
             bridge = self._bridge_for_task()
@@ -1068,8 +1345,7 @@ class CTMTGuiApp:
         task_name = f"Live Dashboard ({panel.name})"
         task_id = self._set_busy(True, task_name)
         self._append_task_terminal(f"START {task_name}")
-        if selected_only:
-            self.live_output.delete("1.0", tk.END)
+        # Keep prior panel output visible until new payload is ready.
 
         def worker():
             bridge = self._bridge_for_task()
@@ -1221,11 +1497,19 @@ class CTMTGuiApp:
         self._start_run_ai_analysis()
 
     def _start_run_ai_analysis(self) -> None:
+        self._start_run_ai_analysis_internal(source_override=None, force_no_confirm=False)
+
+    def _start_run_ai_analysis_internal(self, source_override: Optional[str], force_no_confirm: bool) -> None:
         task_name = "AI Analysis"
         task_id = self._set_busy(True, task_name)
         self._append_task_terminal("START AI Analysis")
         self.ai_output.delete("1.0", tk.END)
+        original_source = self.ai_source.get().strip()
+        if source_override:
+            self.ai_source.set(source_override)
         text = self._resolve_ai_source_text()
+        if source_override:
+            self.ai_source.set(original_source)
         if not text.strip():
             self.ai_output.insert("1.0", "No source text available.")
             self._append_task_terminal("DONE AI Analysis (no source text)")
@@ -1234,7 +1518,7 @@ class CTMTGuiApp:
         self.ai_last_source_text = text
         dt = self.ai_datetime.get().strip() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         prompt = self._build_ai_prompt(text, dt)
-        if self.ai_require_confirm.get():
+        if self.ai_require_confirm.get() and (not force_no_confirm):
             preview = prompt[:2000]
             ok = messagebox.askyesno("Confirm AI Request", f"Send this prompt?\n\n{preview}")
             if not ok:
@@ -1253,6 +1537,43 @@ class CTMTGuiApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _run_live_ai_pipeline_now(self) -> None:
+        # Chain: run all live panels -> queue AI analysis on combined live panels.
+        self._append_task_terminal("Pipeline requested: Live dashboards -> AI analysis/staging.")
+        self._run_all_panels()
+        # AI will run after live task due to queue lock.
+        self._queue_if_busy(
+            "AI Analysis (Pipeline)",
+            lambda: self._start_run_ai_analysis_internal(source_override="live_all_panels", force_no_confirm=True),
+        )
+
+    def _pipeline_tick(self) -> None:
+        self._run_live_ai_pipeline_now()
+        if self.pipeline_job:
+            try:
+                mins = max(1, int((self.pipeline_interval_min_var.get() or "30").strip()))
+            except Exception:
+                mins = 30
+            self.pipeline_job = self.root.after(mins * 60 * 1000, self._pipeline_tick)
+
+    def _start_pipeline_scheduler(self) -> None:
+        self._stop_pipeline_scheduler()
+        try:
+            mins = max(1, int((self.pipeline_interval_min_var.get() or "30").strip()))
+        except Exception:
+            mins = 30
+        self._append_task_terminal(f"Started Live->AI pipeline scheduler ({mins} min interval).")
+        self.pipeline_job = self.root.after(1000, self._pipeline_tick)
+
+    def _stop_pipeline_scheduler(self) -> None:
+        if self.pipeline_job:
+            try:
+                self.root.after_cancel(self.pipeline_job)
+            except Exception:
+                pass
+            self.pipeline_job = None
+            self._append_task_terminal("Stopped Live->AI pipeline scheduler.")
+
     def _finish_ai_output(self, res: Dict[str, Any], task_id: Optional[int] = None) -> None:
         if not res.get("ok"):
             self.ai_output.insert("1.0", "AI analysis failed or returned empty response.\n\nPrompt preview:\n\n")
@@ -1265,6 +1586,9 @@ class CTMTGuiApp:
             if used_prompt:
                 self.ai_conversation.append({"role": "user", "content": used_prompt})
             self.ai_conversation.append({"role": "assistant", "content": response})
+            if bool(self.ai_auto_stage_var.get()):
+                staged = self._stage_ai_recommendations(silent=True)
+                self._append_task_terminal(f"Auto-stage after AI run: {staged} recommendation(s).")
             self._append_task_terminal("DONE AI Analysis")
         self._finish_task(task_id, task_name="AI Analysis")
 
@@ -1399,6 +1723,236 @@ class CTMTGuiApp:
         self.ai_output.delete("1.0", tk.END)
         self.ai_output.insert("1.0", "PROMPT PREVIEW\n" + ("=" * 60) + "\n" + prompt)
 
+    def _extract_trade_recommendations_from_ai_text(self, text: str) -> List[Dict[str, Any]]:
+        recs: List[Dict[str, Any]] = []
+        if not text.strip():
+            return recs
+        # Preferred path: structured JSON payload at bottom of AI response.
+        structured = self._extract_structured_trade_plan_from_ai_text(text)
+        if structured:
+            return structured
+        quote_default = "USDT"
+        try:
+            quote_default = (self.quote_var.get().strip().upper() or "USDT")
+        except Exception:
+            pass
+        allowed_assets: set[str] = set()
+        for s in self._extract_signals_from_live_text((self.latest_live_output_text or "").strip()):
+            a = str(s.get("asset", "")).strip().upper()
+            if a:
+                allowed_assets.add(a)
+
+        lines = text.splitlines()
+        patt = re.compile(
+            r"\b(BUY|SELL)\b[^A-Z0-9]{0,8}\b([A-Z][A-Z0-9]{1,11})(?:[-/ ]?(USDT|USD|BTC|ETH|BNB))?\b",
+            re.IGNORECASE,
+        )
+        seen: set[Tuple[str, str]] = set()
+        for ln in lines:
+            m = patt.search(ln)
+            if not m:
+                continue
+            side = str(m.group(1)).upper()
+            base = str(m.group(2)).upper()
+            if not re.fullmatch(r"[A-Z0-9]{2,8}", base):
+                continue
+            if allowed_assets:
+                if base not in allowed_assets:
+                    continue
+            else:
+                if base not in COMMON_CRYPTO_BASES:
+                    continue
+            q = str(m.group(3) or quote_default).upper()
+            symbol = f"{base}{q}"
+            key = (symbol, side)
+            if key in seen:
+                continue
+            seen.add(key)
+            conf = ""
+            cm = re.search(r"(?:confidence|conviction)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)", ln, re.IGNORECASE)
+            if cm:
+                conf = cm.group(1)
+            self._pending_rec_seq += 1
+            recs.append(
+                {
+                    "id": self._pending_rec_seq,
+                    "symbol": symbol,
+                    "asset": base,
+                    "side": side,
+                    "order_type": "MARKET",
+                    "quantity": 0.0,
+                    "timeframe": (self.timeframe_var.get().strip() or "1d"),
+                    "confidence": conf,
+                    "status": "PENDING",
+                    "reason": ln.strip()[:220],
+                }
+            )
+        return recs
+
+    def _extract_structured_trade_plan_from_ai_text(self, text: str) -> List[Dict[str, Any]]:
+        payload: Optional[Dict[str, Any]] = None
+
+        # First preference: explicit STRATA markers.
+        marker_re = re.compile(
+            r"BEGIN_STRATA_TRADE_PLAN_JSON\s*(\{[\s\S]*?\})\s*END_STRATA_TRADE_PLAN_JSON",
+            re.IGNORECASE,
+        )
+        mm = marker_re.search(text)
+        if mm:
+            try:
+                obj = json.loads(mm.group(1))
+                if isinstance(obj, dict):
+                    payload = obj
+            except Exception:
+                payload = None
+
+        # Fallback: last json fenced block containing trades list.
+        if payload is None:
+            code_blocks = re.findall(r"```json\s*([\s\S]*?)\s*```", text, flags=re.IGNORECASE)
+            for block in reversed(code_blocks):
+                try:
+                    obj = json.loads(block)
+                except Exception:
+                    continue
+                if isinstance(obj, dict) and isinstance(obj.get("trades", None), list):
+                    payload = obj
+                    break
+
+        if payload is None:
+            return []
+
+        trades = payload.get("trades", [])
+        if not isinstance(trades, list):
+            return []
+
+        quote_default = "USDT"
+        try:
+            quote_default = (self.quote_var.get().strip().upper() or "USDT")
+        except Exception:
+            pass
+        allowed_assets: set[str] = set()
+        for s in self._extract_signals_from_live_text((self.latest_live_output_text or "").strip()):
+            a = str(s.get("asset", "")).strip().upper()
+            if a:
+                allowed_assets.add(a)
+
+        recs: List[Dict[str, Any]] = []
+        seen: set[Tuple[str, str]] = set()
+        for tr in trades:
+            if not isinstance(tr, dict):
+                continue
+            symbol = str(tr.get("symbol", "") or "").strip().upper()
+            asset = str(tr.get("asset", "") or "").strip().upper()
+            side = str(tr.get("side", "") or "").strip().upper()
+            if side not in ("BUY", "SELL"):
+                continue
+
+            if not symbol and asset:
+                symbol = f"{asset}{quote_default}"
+            if not asset and symbol:
+                asset = self._base_asset_from_symbol(symbol)
+            if not symbol or not asset:
+                continue
+            if not re.fullmatch(r"[A-Z0-9]{2,12}", asset):
+                continue
+            if allowed_assets:
+                if asset not in allowed_assets:
+                    continue
+            else:
+                if asset not in COMMON_CRYPTO_BASES:
+                    continue
+
+            key = (symbol, side)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            order_type = str(tr.get("order_type", "MARKET") or "MARKET").strip().upper()
+            if order_type not in ("MARKET", "LIMIT"):
+                order_type = "MARKET"
+            timeframe = str(tr.get("timeframe", "") or "").strip().lower() or (self.timeframe_var.get().strip() or "1d")
+            confidence = str(tr.get("confidence", "") or "").strip()
+            reason = str(tr.get("reason", "") or "").strip()
+            qty = 0.0
+            for qk in ("quantity", "qty", "size_qty"):
+                try:
+                    qv = float(tr.get(qk, 0.0) or 0.0)
+                except Exception:
+                    qv = 0.0
+                if qv > 0:
+                    qty = qv
+                    break
+
+            self._pending_rec_seq += 1
+            recs.append(
+                {
+                    "id": self._pending_rec_seq,
+                    "symbol": symbol,
+                    "asset": asset,
+                    "side": side,
+                    "order_type": order_type,
+                    "quantity": qty,
+                    "timeframe": timeframe,
+                    "confidence": confidence,
+                    "status": "PENDING",
+                    "reason": (reason or "Structured trade-plan recommendation")[:300],
+                }
+            )
+        return recs
+
+    def _stage_ai_recommendations(self, silent: bool = False) -> int:
+        text = self.ai_output.get("1.0", tk.END).strip()
+        if not text:
+            if not silent:
+                messagebox.showinfo("AI Recommendations", "Run AI analysis first (or load AI output).")
+            return 0
+        recs = self._extract_trade_recommendations_from_ai_text(text)
+        if not recs:
+            if not silent:
+                messagebox.showinfo("AI Recommendations", "No BUY/SELL recommendations were detected in AI output.")
+            return 0
+        self.pending_recommendations.extend(recs)
+        self._refresh_pending_recommendations_view()
+        self._append_task_terminal(f"Staged {len(recs)} AI recommendation(s) into pending orders.")
+        if bool(self.ai_log_signals_var.get()):
+            try:
+                cooldown = max(1, int((self.pf_cooldown_min_var.get() or "240").strip()))
+            except Exception:
+                cooldown = 240
+            logged = 0
+            for r in recs:
+                out = self.bridge.record_signal_event(
+                    {
+                        "market": "crypto",
+                        "timeframe": str(r.get("timeframe", "1d")),
+                        "panel": "ai_interpretation",
+                        "asset": str(r.get("asset", "")),
+                        "action": str(r.get("side", "")),
+                        "qty": 0.0,
+                        "note": "AI interpretation signal",
+                    },
+                    cooldown_minutes=cooldown,
+                    allow_duplicate=False,
+                )
+                if out.get("ok"):
+                    logged += 1
+            self._append_task_terminal(f"Logged {logged}/{len(recs)} AI signal(s) to ledger.")
+            self._refresh_ledger_view()
+        if self.pf_exec_mode_var.get().strip().lower() == "full_auto":
+            self._append_task_terminal("Execution mode FULL_AUTO: attempting auto-submit for newly staged recommendations.")
+            if hasattr(self, "pending_tree"):
+                self.pending_tree.selection_set(*[str(r.get("id")) for r in recs])
+            self._submit_selected_pending_orders()
+            return len(recs)
+        if not silent:
+            messagebox.showinfo("AI Recommendations", f"Staged {len(recs)} recommendation(s).")
+        return len(recs)
+
+    def _clear_pending_recommendations(self) -> None:
+        self.pending_recommendations = []
+        self._refresh_pending_recommendations_view()
+        self._append_task_terminal("Cleared pending recommendations.")
+
     def _refresh_binance_profiles(self) -> None:
         res = self.bridge.list_binance_profiles()
         if not res.get("ok"):
@@ -1417,6 +1971,221 @@ class CTMTGuiApp:
         else:
             self.pf_binance_profile_var.set("")
         self._append_settings(f"Binance profiles loaded: {len(names)} (active: {self.pf_binance_profile_var.get() or 'none'})")
+
+    def _refresh_pending_recommendations_view(self) -> None:
+        if not hasattr(self, "pending_tree"):
+            return
+        self.pending_tree.delete(*self.pending_tree.get_children())
+        for r in self.pending_recommendations:
+            self.pending_tree.insert(
+                "",
+                "end",
+                iid=str(r.get("id", "")),
+                values=(
+                    r.get("id", ""),
+                    r.get("symbol", ""),
+                    r.get("side", ""),
+                    r.get("order_type", "MARKET"),
+                    r.get("quantity", 0),
+                    r.get("timeframe", ""),
+                    r.get("confidence", ""),
+                    r.get("status", "PENDING"),
+                    r.get("reason", ""),
+                ),
+            )
+
+    def _selected_pending_ids(self) -> List[int]:
+        if not hasattr(self, "pending_tree"):
+            return []
+        out: List[int] = []
+        for iid in self.pending_tree.selection():
+            try:
+                out.append(int(iid))
+            except Exception:
+                continue
+        return out
+
+    def _remove_selected_pending_orders(self) -> None:
+        ids = set(self._selected_pending_ids())
+        if not ids:
+            messagebox.showinfo("Pending Orders", "Select one or more pending rows.")
+            return
+        self.pending_recommendations = [r for r in self.pending_recommendations if int(r.get("id", -1)) not in ids]
+        self._refresh_pending_recommendations_view()
+        self._append_task_terminal(f"Removed {len(ids)} pending recommendation(s).")
+
+    def _apply_pending_edit_to_selected(self) -> None:
+        ids = set(self._selected_pending_ids())
+        if not ids:
+            messagebox.showinfo("Pending Orders", "Select rows first.")
+            return
+        try:
+            qty = float((self.pf_pending_qty_var.get() or "0").strip())
+        except Exception:
+            qty = 0.0
+        otype = str(self.pf_pending_type_var.get() or "MARKET").strip().upper()
+        changed = 0
+        for r in self.pending_recommendations:
+            if int(r.get("id", -1)) in ids:
+                if qty > 0:
+                    r["quantity"] = qty
+                r["order_type"] = otype
+                if str(r.get("status", "")).upper() == "BLOCKED":
+                    r["status"] = "PENDING"
+                changed += 1
+        self._refresh_pending_recommendations_view()
+        self._append_task_terminal(f"Updated {changed} pending recommendation(s).")
+
+    def _base_asset_from_symbol(self, symbol: str) -> str:
+        s = str(symbol).strip().upper()
+        for q in ["USDT", "USDC", "BUSD", "USD", "BTC", "ETH", "BNB"]:
+            if s.endswith(q) and len(s) > len(q):
+                return s[: -len(q)]
+        return s
+
+    def _submit_selected_pending_orders(self) -> None:
+        ids = self._selected_pending_ids()
+        if not ids:
+            messagebox.showinfo("Pending Orders", "Select one or more rows to submit.")
+            return
+        mode = self.pf_exec_mode_var.get().strip().lower()
+        if mode == "manual":
+            messagebox.showinfo("Execution Mode", "Current mode is MANUAL. Switch to semi_auto/full_auto to submit.")
+            return
+        profile = self.pf_binance_profile_var.get().strip() or None
+        if not profile:
+            messagebox.showinfo("Pending Orders", "Select a Binance profile first.")
+            return
+        ok = messagebox.askyesno("Submit Orders", f"Submit {len(ids)} selected order(s) to Binance?")
+        if not ok:
+            return
+        try:
+            cooldown = max(1, int((self.pf_cooldown_min_var.get() or "240").strip()))
+        except Exception:
+            cooldown = 240
+        submitted = 0
+        blocked = 0
+        failed = 0
+        for rid in ids:
+            rec = next((r for r in self.pending_recommendations if int(r.get("id", -1)) == int(rid)), None)
+            if not rec:
+                continue
+            if str(rec.get("status", "")).upper() not in ("PENDING", "FAILED"):
+                continue
+            symbol = str(rec.get("symbol", "")).strip().upper()
+            side = str(rec.get("side", "")).strip().upper()
+            order_type = str(rec.get("order_type", "MARKET")).strip().upper()
+            try:
+                qty = float(rec.get("quantity", 0.0) or 0.0)
+            except Exception:
+                qty = 0.0
+            if qty <= 0:
+                rec["status"] = "BLOCKED"
+                rec["reason"] = "Quantity is 0. Edit quantity before submit."
+                blocked += 1
+                continue
+            out = self.bridge.submit_binance_order(
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                quantity=qty,
+                profile_name=profile,
+            )
+            if not out.get("ok"):
+                rec["status"] = "FAILED"
+                rec["reason"] = str(out.get("error", "submit failed"))
+                failed += 1
+                continue
+            rec["status"] = "SUBMITTED"
+            nq = out.get("normalized_quantity", None)
+            npv = out.get("normalized_price", None)
+            if nq is not None:
+                rec["quantity"] = float(nq)
+            if npv is not None:
+                rec["reason"] = f"{rec.get('reason','')} | normalized px={npv}"
+            submitted += 1
+            self.bridge.record_signal_event(
+                {
+                    "market": "crypto",
+                    "timeframe": str(rec.get("timeframe", "1d")),
+                    "panel": "ai_trade_queue",
+                    "asset": self._base_asset_from_symbol(symbol),
+                    "action": side,
+                    "qty": qty,
+                    "note": f"Submitted to Binance ({symbol})",
+                    "is_execution": True,
+                },
+                cooldown_minutes=cooldown,
+                allow_duplicate=False,
+            )
+        self._refresh_pending_recommendations_view()
+        self._refresh_ledger_view()
+        self._append_task_terminal(
+            f"Submitted pending orders -> submitted={submitted}, blocked={blocked}, failed={failed}"
+        )
+        messagebox.showinfo(
+            "Order Submission",
+            f"Submitted: {submitted}\nBlocked: {blocked}\nFailed: {failed}",
+        )
+
+    def _refresh_open_orders(self) -> None:
+        profile = self.pf_binance_profile_var.get().strip() or None
+        symbol_filter = self.pf_open_symbol_filter_var.get().strip().upper()
+        out = self.bridge.list_open_binance_orders(profile_name=profile, symbol=symbol_filter)
+        if not hasattr(self, "open_orders_tree"):
+            return
+        self.open_orders_tree.delete(*self.open_orders_tree.get_children())
+        if not out.get("ok"):
+            self._append_task_terminal(f"Open orders refresh failed: {out.get('error', 'unknown')}")
+            messagebox.showerror("Open Orders", str(out.get("error", "Failed to fetch open orders.")))
+            return
+        for o in out.get("orders", []) or []:
+            self.open_orders_tree.insert(
+                "",
+                "end",
+                values=(
+                    o.get("symbol", ""),
+                    o.get("orderId", ""),
+                    o.get("side", ""),
+                    o.get("type", ""),
+                    o.get("status", ""),
+                    o.get("price", ""),
+                    o.get("origQty", ""),
+                    o.get("executedQty", ""),
+                ),
+            )
+        self._append_task_terminal(f"Open orders refreshed ({len(out.get('orders', []) or [])} rows).")
+
+    def _cancel_selected_open_orders(self) -> None:
+        if not hasattr(self, "open_orders_tree"):
+            return
+        sels = list(self.open_orders_tree.selection())
+        if not sels:
+            messagebox.showinfo("Cancel Orders", "Select one or more open orders first.")
+            return
+        ok = messagebox.askyesno("Cancel Orders", f"Cancel {len(sels)} selected order(s)?")
+        if not ok:
+            return
+        profile = self.pf_binance_profile_var.get().strip() or None
+        done = 0
+        fail = 0
+        for iid in sels:
+            vals = self.open_orders_tree.item(iid, "values")
+            if not vals or len(vals) < 2:
+                continue
+            symbol = str(vals[0]).strip().upper()
+            try:
+                oid = int(vals[1])
+            except Exception:
+                continue
+            out = self.bridge.cancel_binance_order(symbol=symbol, order_id=oid, profile_name=profile)
+            if out.get("ok"):
+                done += 1
+            else:
+                fail += 1
+        self._refresh_open_orders()
+        self._append_task_terminal(f"Cancel orders -> canceled={done}, failed={fail}")
+        messagebox.showinfo("Cancel Orders", f"Canceled: {done}\nFailed: {fail}")
 
     def _refresh_portfolio(self) -> None:
         task_name = "Binance Portfolio Refresh"
@@ -1575,6 +2344,7 @@ class CTMTGuiApp:
                 "price": price,
                 "qty": qty,
                 "note": note,
+                "is_execution": bool(qty > 0),
             },
             cooldown_minutes=cooldown,
             allow_duplicate=False,
@@ -2019,12 +2789,13 @@ class CTMTGuiApp:
         self.state["live_panels"] = [asdict(p) for p in self.live_panels]
         save_state(self.state)
 
-
 def run_gui() -> None:
     root = tk.Tk()
     repo_root = Path(__file__).resolve().parents[1]
-    app = CTMTGuiApp(root, repo_root=repo_root)
+    app = StrataGuiApp(root, repo_root=repo_root)
+
     def _shutdown():
+        app._stop_pipeline_scheduler()
         app._close_task_monitor()
         if app.task_tab_job:
             try:
@@ -2034,6 +2805,7 @@ def run_gui() -> None:
             app.task_tab_job = None
         app._persist_state()
         root.destroy()
+
     root.protocol("WM_DELETE_WINDOW", _shutdown)
     root.mainloop()
 

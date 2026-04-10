@@ -10,8 +10,9 @@ import threading
 import time
 import urllib.parse
 from contextlib import redirect_stderr, redirect_stdout
+from decimal import Decimal, ROUND_DOWN, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
@@ -33,6 +34,7 @@ class EngineBridge:
         self.nightly_path = repo_root / "nightly" / "BTC-beta.py"
         self.scripts_dir = repo_root / "scripts"
         self._lock = threading.Lock()
+        self._binance_exchange_info_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         self.mod = self._load_nightly_module()
         self.mod.ensure_table()
 
@@ -468,7 +470,15 @@ class EngineBridge:
             "secret_source": secret_source,
         }
 
-    def _signed_binance_get(self, endpoint: str, path: str, api_key: str, api_secret: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _signed_binance_request(
+        self,
+        method: str,
+        endpoint: str,
+        path: str,
+        api_key: str,
+        api_secret: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         q = dict(params or {})
         q["timestamp"] = int(time.time() * 1000)
         q.setdefault("recvWindow", 5000)
@@ -477,12 +487,203 @@ class EngineBridge:
         url = endpoint.rstrip("/") + path + "?" + query + "&signature=" + sig
         headers = {"X-MBX-APIKEY": api_key}
         try:
-            r = requests.get(url, headers=headers, timeout=30)
+            m = method.strip().upper()
+            if m == "POST":
+                r = requests.post(url, headers=headers, timeout=30)
+            elif m == "DELETE":
+                r = requests.delete(url, headers=headers, timeout=30)
+            else:
+                r = requests.get(url, headers=headers, timeout=30)
             if not (200 <= r.status_code < 300):
                 return {"ok": False, "status": r.status_code, "error": (r.text or "")[:1200]}
             return {"ok": True, "status": r.status_code, "data": r.json()}
         except Exception as e:
             return {"ok": False, "status": -1, "error": str(e)}
+
+    def _signed_binance_get(self, endpoint: str, path: str, api_key: str, api_secret: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._signed_binance_request("GET", endpoint, path, api_key, api_secret, params=params)
+
+    @staticmethod
+    def _to_decimal(v: Any, default: str = "0") -> Decimal:
+        try:
+            return Decimal(str(v))
+        except (InvalidOperation, ValueError, TypeError):
+            return Decimal(default)
+
+    @staticmethod
+    def _round_to_step(value: Decimal, step: Decimal) -> Decimal:
+        if step <= Decimal("0"):
+            return value
+        # Floor to allowed increment.
+        units = (value / step).to_integral_value(rounding=ROUND_DOWN)
+        return units * step
+
+    def _get_symbol_exchange_info(self, endpoint: str, symbol: str, ttl_seconds: int = 300) -> Optional[Dict[str, Any]]:
+        sym = str(symbol).strip().upper()
+        if not sym:
+            return None
+        key = f"{endpoint.rstrip('/')}|{sym}"
+        now = time.time()
+        cached = self._binance_exchange_info_cache.get(key)
+        if cached:
+            ts, payload = cached
+            if now - float(ts) <= max(5, int(ttl_seconds)):
+                return payload
+        try:
+            url = endpoint.rstrip("/") + "/api/v3/exchangeInfo"
+            r = requests.get(url, params={"symbol": sym}, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+            symbols = data.get("symbols", []) if isinstance(data, dict) else []
+            if not isinstance(symbols, list) or not symbols:
+                return None
+            payload = symbols[0] if isinstance(symbols[0], dict) else None
+            if payload:
+                self._binance_exchange_info_cache[key] = (now, payload)
+            return payload
+        except Exception:
+            return None
+
+    def _get_last_price(self, endpoint: str, symbol: str) -> Optional[Decimal]:
+        sym = str(symbol).strip().upper()
+        if not sym:
+            return None
+        try:
+            url = endpoint.rstrip("/") + "/api/v3/ticker/price"
+            r = requests.get(url, params={"symbol": sym}, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            if not isinstance(data, dict):
+                return None
+            px = self._to_decimal(data.get("price", "0"))
+            if px > Decimal("0"):
+                return px
+            return None
+        except Exception:
+            return None
+
+    def validate_binance_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: float,
+        profile_name: Optional[str] = None,
+        price: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        sym = str(symbol).strip().upper()
+        s = str(side).strip().upper()
+        t = str(order_type).strip().upper()
+        if not sym or s not in ("BUY", "SELL"):
+            return {"ok": False, "error": "Valid symbol and side (BUY/SELL) are required."}
+        if t not in ("MARKET", "LIMIT"):
+            return {"ok": False, "error": "order_type must be MARKET or LIMIT."}
+
+        qty = self._to_decimal(quantity)
+        if qty <= Decimal("0"):
+            return {"ok": False, "error": "Quantity must be > 0."}
+
+        _, profile, _, err = self._resolve_active_binance_profile(profile_name)
+        if err:
+            return {"ok": False, "error": err}
+        endpoint = str((profile or {}).get("endpoint", self._default_binance_endpoint()) or self._default_binance_endpoint())
+
+        info = self._get_symbol_exchange_info(endpoint, sym)
+        if not info:
+            return {"ok": False, "error": f"Unable to load exchange info for {sym}."}
+        filters = info.get("filters", []) if isinstance(info, dict) else []
+        if not isinstance(filters, list):
+            filters = []
+
+        f_map: Dict[str, Dict[str, Any]] = {}
+        for f in filters:
+            if isinstance(f, dict):
+                k = str(f.get("filterType", "")).strip()
+                if k:
+                    f_map[k] = f
+
+        lot = f_map.get("LOT_SIZE", {})
+        market_lot = f_map.get("MARKET_LOT_SIZE", {})
+        price_f = f_map.get("PRICE_FILTER", {})
+        min_notional_f = f_map.get("MIN_NOTIONAL", {})
+        notional_f = f_map.get("NOTIONAL", {})
+
+        lot_filter = market_lot if t == "MARKET" and market_lot else lot
+        min_qty = self._to_decimal(lot_filter.get("minQty", "0"))
+        max_qty = self._to_decimal(lot_filter.get("maxQty", "0"))
+        step_qty = self._to_decimal(lot_filter.get("stepSize", "0"))
+
+        norm_qty = self._round_to_step(qty, step_qty) if step_qty > Decimal("0") else qty
+        if norm_qty <= Decimal("0"):
+            return {"ok": False, "error": f"Quantity too small after step-size normalization (step {step_qty})."}
+        if min_qty > Decimal("0") and norm_qty < min_qty:
+            return {"ok": False, "error": f"Quantity {norm_qty} below minQty {min_qty}."}
+        if max_qty > Decimal("0") and norm_qty > max_qty:
+            return {"ok": False, "error": f"Quantity {norm_qty} above maxQty {max_qty}."}
+
+        norm_price: Optional[Decimal] = None
+        if t == "LIMIT":
+            p = self._to_decimal(price or 0)
+            if p <= Decimal("0"):
+                return {"ok": False, "error": "Limit orders require positive price."}
+            tick = self._to_decimal(price_f.get("tickSize", "0"))
+            min_p = self._to_decimal(price_f.get("minPrice", "0"))
+            max_p = self._to_decimal(price_f.get("maxPrice", "0"))
+            norm_price = self._round_to_step(p, tick) if tick > Decimal("0") else p
+            if min_p > Decimal("0") and norm_price < min_p:
+                return {"ok": False, "error": f"Price {norm_price} below minPrice {min_p}."}
+            if max_p > Decimal("0") and norm_price > max_p:
+                return {"ok": False, "error": f"Price {norm_price} above maxPrice {max_p}."}
+
+        # Notional checks (order value).
+        check_price = norm_price
+        if check_price is None:
+            check_price = self._get_last_price(endpoint, sym)
+        if check_price is not None and check_price > Decimal("0"):
+            notion = norm_qty * check_price
+            min_notional = Decimal("0")
+            max_notional = Decimal("0")
+            apply_min = True
+            apply_max = False
+
+            if isinstance(min_notional_f, dict) and min_notional_f:
+                min_notional = self._to_decimal(min_notional_f.get("minNotional", "0"))
+                if t == "MARKET":
+                    apply_min = bool(min_notional_f.get("applyToMarket", True))
+            if isinstance(notional_f, dict) and notional_f:
+                mn = self._to_decimal(notional_f.get("minNotional", "0"))
+                mx = self._to_decimal(notional_f.get("maxNotional", "0"))
+                if mn > Decimal("0"):
+                    min_notional = mn
+                if mx > Decimal("0"):
+                    max_notional = mx
+                if t == "MARKET":
+                    apply_min = bool(notional_f.get("applyMinToMarket", True))
+                    apply_max = bool(notional_f.get("applyMaxToMarket", False))
+                else:
+                    apply_min = True
+                    apply_max = max_notional > Decimal("0")
+
+            if apply_min and min_notional > Decimal("0") and notion < min_notional:
+                return {
+                    "ok": False,
+                    "error": f"Order notional {notion:.8f} below minNotional {min_notional}. Increase quantity.",
+                }
+            if apply_max and max_notional > Decimal("0") and notion > max_notional:
+                return {
+                    "ok": False,
+                    "error": f"Order notional {notion:.8f} above maxNotional {max_notional}. Reduce quantity.",
+                }
+
+        return {
+            "ok": True,
+            "symbol": sym,
+            "side": s,
+            "order_type": t,
+            "normalized_quantity": float(norm_qty),
+            "normalized_price": (float(norm_price) if norm_price is not None else None),
+            "note": "Validated against Binance symbol filters.",
+        }
 
     def list_binance_profiles(self) -> Dict[str, Any]:
         with self._lock:
@@ -723,9 +924,169 @@ class EngineBridge:
                 "balances": rows,
             }
 
+    def _resolve_active_binance_profile(self, profile_name: Optional[str] = None) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[Dict[str, str]], Optional[str]]:
+        prefs = load_binance_preferences()
+        secrets = load_binance_secrets()
+        profiles = prefs.get("profiles", {}) if isinstance(prefs, dict) else {}
+        if not isinstance(profiles, dict) or not profiles:
+            return None, None, None, "No Binance profiles configured."
+        active = str(profile_name or prefs.get("active_profile", "") or "").strip()
+        if not active or active not in profiles:
+            active = next(iter(profiles.keys()))
+        profile = profiles.get(active, {})
+        if not isinstance(profile, dict):
+            return None, None, None, f"Profile not found: {active}"
+        creds = self._resolve_binance_credentials(profile, secrets)
+        if not creds["api_key"] or not creds["api_secret"]:
+            return None, None, None, f"Missing API key/secret ({creds['key_source']}, {creds['secret_source']})."
+        return active, profile, creds, None
+
+    def list_open_binance_orders(self, profile_name: Optional[str] = None, symbol: str = "") -> Dict[str, Any]:
+        with self._lock:
+            active, profile, creds, err = self._resolve_active_binance_profile(profile_name)
+            if err:
+                return {"ok": False, "error": err}
+            endpoint = str((profile or {}).get("endpoint", self._default_binance_endpoint()) or self._default_binance_endpoint())
+            params: Dict[str, Any] = {}
+            sym = str(symbol).strip().upper()
+            if sym:
+                params["symbol"] = sym
+            out = self._signed_binance_get(endpoint, "/api/v3/openOrders", str(creds["api_key"]), str(creds["api_secret"]), params=params)
+            if not out.get("ok"):
+                return {"ok": False, "status": out.get("status"), "error": out.get("error", "openOrders request failed")}
+            data = out.get("data", [])
+            rows: List[Dict[str, Any]] = []
+            if isinstance(data, list):
+                for o in data:
+                    if not isinstance(o, dict):
+                        continue
+                    rows.append(
+                        {
+                            "symbol": str(o.get("symbol", "") or ""),
+                            "orderId": int(o.get("orderId", 0) or 0),
+                            "side": str(o.get("side", "") or ""),
+                            "type": str(o.get("type", "") or ""),
+                            "status": str(o.get("status", "") or ""),
+                            "price": str(o.get("price", "") or ""),
+                            "origQty": str(o.get("origQty", "") or ""),
+                            "executedQty": str(o.get("executedQty", "") or ""),
+                        }
+                    )
+            return {"ok": True, "profile": active, "orders": rows}
+
+    def cancel_binance_order(self, symbol: str, order_id: int, profile_name: Optional[str] = None) -> Dict[str, Any]:
+        with self._lock:
+            sym = str(symbol).strip().upper()
+            if not sym:
+                return {"ok": False, "error": "Symbol is required."}
+            oid = int(order_id or 0)
+            if oid <= 0:
+                return {"ok": False, "error": "order_id must be > 0."}
+            active, profile, creds, err = self._resolve_active_binance_profile(profile_name)
+            if err:
+                return {"ok": False, "error": err}
+            endpoint = str((profile or {}).get("endpoint", self._default_binance_endpoint()) or self._default_binance_endpoint())
+            out = self._signed_binance_request(
+                "DELETE",
+                endpoint,
+                "/api/v3/order",
+                str(creds["api_key"]),
+                str(creds["api_secret"]),
+                params={"symbol": sym, "orderId": oid},
+            )
+            if not out.get("ok"):
+                return {"ok": False, "status": out.get("status"), "error": out.get("error", "cancel request failed")}
+            return {"ok": True, "profile": active, "data": out.get("data", {})}
+
+    def submit_binance_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: float,
+        profile_name: Optional[str] = None,
+        price: Optional[float] = None,
+        time_in_force: str = "GTC",
+    ) -> Dict[str, Any]:
+        with self._lock:
+            v = self.validate_binance_order(
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                quantity=quantity,
+                profile_name=profile_name,
+                price=price,
+            )
+            if not v.get("ok"):
+                return {"ok": False, "error": v.get("error", "Binance order validation failed.")}
+            sym = str(v.get("symbol", "")).upper()
+            s = str(v.get("side", "")).upper()
+            t = str(v.get("order_type", "")).upper()
+            qty = float(v.get("normalized_quantity", 0.0) or 0.0)
+            px_norm = v.get("normalized_price", None)
+            active, profile, creds, err = self._resolve_active_binance_profile(profile_name)
+            if err:
+                return {"ok": False, "error": err}
+            endpoint = str((profile or {}).get("endpoint", self._default_binance_endpoint()) or self._default_binance_endpoint())
+            params: Dict[str, Any] = {
+                "symbol": sym,
+                "side": s,
+                "type": t,
+                "quantity": f"{qty:.8f}".rstrip("0").rstrip("."),
+            }
+            if t == "LIMIT":
+                try:
+                    px = float(px_norm if px_norm is not None else (price or 0.0))
+                except Exception:
+                    px = 0.0
+                if px <= 0:
+                    return {"ok": False, "error": "Limit orders require positive price."}
+                params["price"] = f"{px:.8f}".rstrip("0").rstrip(".")
+                params["timeInForce"] = str(time_in_force or "GTC").upper()
+            out = self._signed_binance_request(
+                "POST",
+                endpoint,
+                "/api/v3/order",
+                str(creds["api_key"]),
+                str(creds["api_secret"]),
+                params=params,
+            )
+            if not out.get("ok"):
+                return {"ok": False, "status": out.get("status"), "error": out.get("error", "order submit failed")}
+            return {
+                "ok": True,
+                "profile": active,
+                "data": out.get("data", {}),
+                "normalized_quantity": qty,
+                "normalized_price": px_norm,
+            }
+
     def get_trade_ledger(self) -> Dict[str, Any]:
         with self._lock:
-            return {"ok": True, "ledger": load_trade_ledger()}
+            ledger = load_trade_ledger()
+            if not isinstance(ledger, dict):
+                ledger = default_trade_ledger()
+            open_positions = ledger.get("open_positions", {})
+            if not isinstance(open_positions, dict):
+                open_positions = {}
+            cleaned: Dict[str, Any] = {}
+            changed = False
+            for k, v in open_positions.items():
+                if not isinstance(k, str) or not isinstance(v, dict):
+                    changed = True
+                    continue
+                try:
+                    qty = float(v.get("qty", 0.0) or 0.0)
+                except Exception:
+                    qty = 0.0
+                if qty <= 0:
+                    changed = True
+                    continue
+                cleaned[k] = v
+            if changed:
+                ledger["open_positions"] = cleaned
+                save_trade_ledger(ledger)
+            return {"ok": True, "ledger": ledger}
 
     def record_signal_event(self, event: Dict[str, Any], cooldown_minutes: int = 240, allow_duplicate: bool = False) -> Dict[str, Any]:
         with self._lock:
@@ -749,6 +1110,7 @@ class EngineBridge:
             panel = str(event.get("panel", "live")).strip()
             note = str(event.get("note", "")).strip()
             score = str(event.get("score", "")).strip()
+            is_execution = bool(event.get("is_execution", False))
             try:
                 price = float(event.get("price", 0.0) or 0.0)
             except Exception:
@@ -793,13 +1155,14 @@ class EngineBridge:
                 "qty": qty,
                 "score": score,
                 "note": note,
+                "is_execution": is_execution,
             }
             entries.append(rec)
             activity_guard[guard_key] = {"ts": rec["ts"], "id": entry_id}
 
             pos_key = f"{market}|{timeframe}|{asset}"
             open_pos = open_positions.get(pos_key)
-            if action == "BUY":
+            if action == "BUY" and is_execution and qty > 0:
                 open_positions[pos_key] = {
                     "entry_id": entry_id,
                     "entry_ts": rec["ts"],
@@ -810,7 +1173,7 @@ class EngineBridge:
                     "timeframe": timeframe,
                     "panel": panel,
                 }
-            elif action == "SELL":
+            elif action == "SELL" and is_execution:
                 if isinstance(open_pos, dict):
                     rec["closed_entry_id"] = int(open_pos.get("entry_id", 0) or 0)
                     try:
