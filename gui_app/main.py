@@ -105,6 +105,16 @@ class CTMTGuiApp:
         self._build_ai_tab()
         self._build_research_tab()
         self._build_settings_tab()
+        self._build_status_bar()
+
+    def _build_status_bar(self) -> None:
+        bar = ttk.Frame(self.root, padding=(8, 4))
+        bar.pack(side="bottom", fill="x")
+        self.status_var = tk.StringVar(value="Ready")
+        self.status_label = ttk.Label(bar, textvariable=self.status_var)
+        self.status_label.pack(side="left")
+        self.status_progress = ttk.Progressbar(bar, mode="indeterminate", length=180)
+        self.status_progress.pack(side="right")
 
     def _build_live_tab(self) -> None:
         left = ttk.Frame(self.live_tab, padding=8)
@@ -147,8 +157,10 @@ class CTMTGuiApp:
         ttk.Button(btns, text="Add Panel", command=self._add_panel).pack(fill="x")
         ttk.Button(btns, text="Update Panel", command=self._update_panel).pack(fill="x", pady=2)
         ttk.Button(btns, text="Remove Panel", command=self._remove_panel).pack(fill="x")
-        ttk.Button(btns, text="Run Selected", command=self._run_selected_panel).pack(fill="x", pady=(8, 2))
-        ttk.Button(btns, text="Run All Panels", command=self._run_all_panels).pack(fill="x")
+        self.btn_run_selected = ttk.Button(btns, text="Run Selected", command=self._run_selected_panel)
+        self.btn_run_selected.pack(fill="x", pady=(8, 2))
+        self.btn_run_all = ttk.Button(btns, text="Run All Panels", command=self._run_all_panels)
+        self.btn_run_all.pack(fill="x")
 
         auto = ttk.LabelFrame(left, text="Auto Refresh", padding=8)
         auto.pack(fill="x", pady=8)
@@ -190,7 +202,48 @@ class CTMTGuiApp:
         )
         self._labeled_entry(top, "Manual code", self.bt_country_manual)
         self._labeled_entry(top, "Initial USD", self.bt_initial)
-        ttk.Button(top, text="Run Backtest", command=self._run_backtest).pack(side="left", padx=8)
+        self.bt_stop_loss = tk.StringVar(value="8")
+        self.bt_take_profit = tk.StringVar(value="20")
+        self.bt_max_hold_days = tk.StringVar(value="45")
+        self.bt_min_hold_bars = tk.StringVar(value="2")
+        self.bt_cooldown_bars = tk.StringVar(value="1")
+        self.bt_same_asset_cooldown = tk.StringVar(value="3")
+        self.bt_max_same_asset_entries = tk.StringVar(value="3")
+        self.bt_fee_pct = tk.StringVar(value="0.10")
+        self.bt_slippage_pct = tk.StringVar(value="0.05")
+        self.bt_position_size_pct = tk.StringVar(value="30")
+        self.bt_atr_mult = tk.StringVar(value="2.2")
+        self.bt_adx_threshold = tk.StringVar(value="25")
+        self.bt_cmf_threshold = tk.StringVar(value="0.02")
+        self.bt_obv_threshold = tk.StringVar(value="0")
+        self.bt_max_dd_target_pct = tk.StringVar(value="35")
+        self.bt_max_exposure_pct = tk.StringVar(value="40")
+        self.bt_cache_workers = tk.StringVar(value="8")
+        self.bt_buy_threshold = tk.StringVar(value="2")
+        self.bt_sell_threshold = tk.StringVar(value="-2")
+
+        self._labeled_entry(top, "Stop loss %", self.bt_stop_loss)
+        self._labeled_entry(top, "Take profit %", self.bt_take_profit)
+        self._labeled_entry(top, "Max hold days", self.bt_max_hold_days)
+        self._labeled_entry(top, "Min hold bars", self.bt_min_hold_bars)
+        self._labeled_entry(top, "Cooldown bars", self.bt_cooldown_bars)
+        self._labeled_entry(top, "Re-entry cooldown", self.bt_same_asset_cooldown)
+        self._labeled_entry(top, "Max same-asset entries", self.bt_max_same_asset_entries)
+        self._labeled_entry(top, "Fee % per leg", self.bt_fee_pct)
+        self._labeled_entry(top, "Slippage % per leg", self.bt_slippage_pct)
+        self._labeled_entry(top, "Position size %", self.bt_position_size_pct)
+        self._labeled_entry(top, "ATR multiplier", self.bt_atr_mult)
+        self._labeled_entry(top, "ADX threshold", self.bt_adx_threshold)
+        self._labeled_entry(top, "CMF threshold", self.bt_cmf_threshold)
+        self._labeled_entry(top, "OBV slope threshold", self.bt_obv_threshold)
+        self._labeled_entry(top, "Max DD target %", self.bt_max_dd_target_pct)
+        self._labeled_entry(top, "Max exposure %", self.bt_max_exposure_pct)
+        self._labeled_entry(top, "Cache workers", self.bt_cache_workers)
+        self._labeled_entry(top, "Buy threshold", self.bt_buy_threshold)
+        self._labeled_entry(top, "Sell threshold", self.bt_sell_threshold)
+
+        self.btn_run_backtest = ttk.Button(top, text="Run Backtest", command=self._run_backtest)
+        self.btn_run_backtest.pack(side="left", padx=8)
 
         self.bt_summary = tk.Text(out, height=10, wrap="word")
         self.bt_summary.pack(fill="x")
@@ -209,7 +262,8 @@ class CTMTGuiApp:
         ttk.Entry(top, textvariable=self.ai_datetime, width=24).pack(side="left", padx=4)
         ttk.Label(top, text="Source").pack(side="left", padx=(12, 0))
         ttk.Combobox(top, textvariable=self.ai_source, values=["live", "backtest", "paste"], width=12, state="readonly").pack(side="left", padx=4)
-        ttk.Button(top, text="Run AI Analysis", command=self._run_ai_analysis).pack(side="left", padx=8)
+        self.btn_run_ai = ttk.Button(top, text="Run AI Analysis", command=self._run_ai_analysis)
+        self.btn_run_ai.pack(side="left", padx=8)
 
         self.ai_input = tk.Text(body, height=14, wrap="word")
         self.ai_input.pack(fill="x")
@@ -239,8 +293,10 @@ class CTMTGuiApp:
         self._labeled_entry(top, "Manual code", self.rs_country_manual)
         self._labeled_entry(top, "Trials", self.rs_trials)
         self._labeled_entry(top, "Jobs", self.rs_jobs)
-        ttk.Button(top, text="Run Standard", command=self._run_standard_research).pack(side="left", padx=8)
-        ttk.Button(top, text="Run Comprehensive", command=self._run_comprehensive_research).pack(side="left")
+        self.btn_run_research_std = ttk.Button(top, text="Run Standard", command=self._run_standard_research)
+        self.btn_run_research_std.pack(side="left", padx=8)
+        self.btn_run_research_comp = ttk.Button(top, text="Run Comprehensive", command=self._run_comprehensive_research)
+        self.btn_run_research_comp.pack(side="left")
 
         self.rs_output = tk.Text(self.research_tab, wrap="word")
         self.rs_output.pack(fill="both", expand=True, padx=8, pady=8)
@@ -347,6 +403,28 @@ class CTMTGuiApp:
     def _notify_busy(self, task_name: str) -> None:
         messagebox.showinfo("Task Running", f"A task is already running. Please wait before starting {task_name}.")
 
+    def _set_busy(self, busy: bool, task_name: str = "") -> None:
+        self.busy = busy
+        run_state = "disabled" if busy else "normal"
+        for btn_name in [
+            "btn_run_selected",
+            "btn_run_all",
+            "btn_run_backtest",
+            "btn_run_ai",
+            "btn_run_research_std",
+            "btn_run_research_comp",
+        ]:
+            btn = getattr(self, btn_name, None)
+            if btn is not None:
+                btn.configure(state=run_state)
+        if busy:
+            label = f"Running: {task_name}" if task_name else "Running..."
+            self.status_var.set(label)
+            self.status_progress.start(10)
+        else:
+            self.status_progress.stop()
+            self.status_var.set("Ready")
+
     def _add_panel(self) -> None:
         self.live_panels.append(self._panel_from_form())
         self._refresh_panel_list()
@@ -379,7 +457,7 @@ class CTMTGuiApp:
         if self.busy:
             self._notify_busy("Run All Panels")
             return
-        self.busy = True
+        self._set_busy(True, "Live Dashboard (All Panels)")
         self.live_output.delete("1.0", tk.END)
 
         def worker():
@@ -415,7 +493,7 @@ class CTMTGuiApp:
         if self.busy:
             self._notify_busy("Live Dashboard refresh")
             return
-        self.busy = True
+        self._set_busy(True, f"Live Dashboard ({panel.name})")
         if selected_only:
             self.live_output.delete("1.0", tk.END)
 
@@ -447,7 +525,7 @@ class CTMTGuiApp:
     def _finish_live_output(self, text: str) -> None:
         self.live_output.delete("1.0", tk.END)
         self.live_output.insert("1.0", text)
-        self.busy = False
+        self._set_busy(False)
         self._persist_state()
 
     def _start_auto_refresh(self) -> None:
@@ -476,18 +554,49 @@ class CTMTGuiApp:
         if self.busy:
             self._notify_busy("Backtest")
             return
-        self.busy = True
+        self._set_busy(True, "Backtest")
         self.bt_summary.delete("1.0", tk.END)
         self.bt_trades.delete("1.0", tk.END)
+
+        def _to_int(v: str, default: int) -> int:
+            try:
+                return int(str(v).strip())
+            except Exception:
+                return default
+
+        def _to_float(v: str, default: float) -> float:
+            try:
+                return float(str(v).strip())
+            except Exception:
+                return default
 
         cfg = {
             "market": self.bt_market.get(),
             "timeframe": self.bt_tf.get(),
-            "months": int(self.bt_months.get() or "12"),
-            "top_n": int(self.bt_topn.get() or "20"),
+            "months": _to_int(self.bt_months.get(), 12),
+            "top_n": _to_int(self.bt_topn.get(), 20),
             "quote_currency": self.bt_quote.get(),
             "country": parse_country_code(self.bt_country.get(), self.bt_country_manual.get()),
-            "initial_capital": float(self.bt_initial.get() or "10000"),
+            "initial_capital": _to_float(self.bt_initial.get(), 10000.0),
+            "stop_loss_pct": _to_float(self.bt_stop_loss.get(), 8.0),
+            "take_profit_pct": _to_float(self.bt_take_profit.get(), 20.0),
+            "max_hold_days": _to_int(self.bt_max_hold_days.get(), 45),
+            "min_hold_bars": _to_int(self.bt_min_hold_bars.get(), 2),
+            "cooldown_bars": _to_int(self.bt_cooldown_bars.get(), 1),
+            "same_asset_cooldown_bars": _to_int(self.bt_same_asset_cooldown.get(), 3),
+            "max_consecutive_same_asset_entries": _to_int(self.bt_max_same_asset_entries.get(), 3),
+            "fee_pct": _to_float(self.bt_fee_pct.get(), 0.10),
+            "slippage_pct": _to_float(self.bt_slippage_pct.get(), 0.05),
+            "position_size": max(0.01, min(1.0, _to_float(self.bt_position_size_pct.get(), 30.0) / 100.0)),
+            "atr_multiplier": _to_float(self.bt_atr_mult.get(), 2.2),
+            "adx_threshold": _to_float(self.bt_adx_threshold.get(), 25.0),
+            "cmf_threshold": _to_float(self.bt_cmf_threshold.get(), 0.02),
+            "obv_slope_threshold": _to_float(self.bt_obv_threshold.get(), 0.0),
+            "max_drawdown_limit_pct": _to_float(self.bt_max_dd_target_pct.get(), 35.0),
+            "max_exposure_pct": max(0.01, min(1.0, _to_float(self.bt_max_exposure_pct.get(), 40.0) / 100.0)),
+            "cache_workers": _to_int(self.bt_cache_workers.get(), 8),
+            "buy_threshold": _to_int(self.bt_buy_threshold.get(), 2),
+            "sell_threshold": _to_int(self.bt_sell_threshold.get(), -2),
             "display_currency": self.display_currency_var.get() or "USD",
         }
 
@@ -503,13 +612,13 @@ class CTMTGuiApp:
         else:
             self.bt_summary.insert("1.0", res.get("summary_text", ""))
             self.bt_trades.insert("1.0", res.get("trades_text", ""))
-        self.busy = False
+        self._set_busy(False)
 
     def _run_ai_analysis(self) -> None:
         if self.busy:
             self._notify_busy("AI Analysis")
             return
-        self.busy = True
+        self._set_busy(True, "AI Analysis")
         self.ai_output.delete("1.0", tk.END)
         source = self.ai_source.get().strip().lower()
         if source == "live":
@@ -522,7 +631,7 @@ class CTMTGuiApp:
             text = self.ai_input.get("1.0", tk.END).strip()
         if not text.strip():
             self.ai_output.insert("1.0", "No source text available.")
-            self.busy = False
+            self._set_busy(False)
             return
         dt = self.ai_datetime.get().strip() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -538,7 +647,7 @@ class CTMTGuiApp:
             self.ai_output.insert("end", (res.get("prompt", "") or "")[:4000])
         else:
             self.ai_output.insert("1.0", res.get("response", ""))
-        self.busy = False
+        self._set_busy(False)
 
     def _run_standard_research(self) -> None:
         self._run_research_job(standard=True)
@@ -550,7 +659,7 @@ class CTMTGuiApp:
         if self.busy:
             self._notify_busy("Auto-Research")
             return
-        self.busy = True
+        self._set_busy(True, "Auto-Research")
         self.rs_output.delete("1.0", tk.END)
 
         def worker():
@@ -613,7 +722,7 @@ class CTMTGuiApp:
         if out.get("stderr"):
             lines += ["STDERR:", out["stderr"], ""]
         self.rs_output.insert("1.0", "\n".join(lines))
-        self.busy = False
+        self._set_busy(False)
 
     def _save_dashboard_profile(self) -> None:
         name = self.dashboard_name_var.get().strip() or "default"
