@@ -60,6 +60,12 @@ GUI (gui-nightly branch):
 python scripts/run_gui.py
 ```
 
+GUI traditional-region UX:
+
+- Country selector now uses readable region names (not numeric-only codes).
+- Selector is searchable by typing.
+- Manual country-code override field is available for advanced use.
+
 ## Nightly Highlights (`nightly/BTC-beta.py`)
 
 - User-selectable analysis interval: `1d`, `4h`, `8h`, `12h`

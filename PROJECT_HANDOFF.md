@@ -152,6 +152,10 @@
   - added launcher `scripts/run_gui.py`
   - updated `README.md` with GUI launch command
   - validated syntax compile for new GUI files and existing nightly/scripts modules
+- Improved GUI traditional-market country selector usability:
+  - switched from numeric-only country display to readable region labels
+  - added type-to-search filtering in selector
+  - added manual country-code override field for advanced/custom routing
 
 ## Current Files of Interest
 - `nightly/BTC-beta.py`
@@ -208,7 +212,7 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-10T01:30:04+00:00
+- Last update UTC: 2026-04-10T01:51:09+00:00
 - Latest experiment artifact: `experiments/runs/run_20260409T224249Z.json`
 - Champion scenarios tracked: 4
 - Latest run summary:

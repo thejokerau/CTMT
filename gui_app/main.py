@@ -3,6 +3,7 @@ import tkinter as tk
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
+import re
 from tkinter import ttk, messagebox
 from typing import Any, Dict, List, Optional
 
@@ -19,6 +20,45 @@ class LivePanelConfig:
     top_n: int = 20
     country: str = "2"
     display_currency: str = "USD"
+
+
+COUNTRY_LABELS = {
+    "1": "Australia",
+    "2": "United States",
+    "3": "United Kingdom",
+    "4": "Europe",
+    "5": "Canada",
+    "6": "Other / Manual",
+}
+
+
+def country_display_values() -> List[str]:
+    return [f"{name} ({code})" for code, name in COUNTRY_LABELS.items()]
+
+
+def country_code_to_display(code: str) -> str:
+    c = str(code).strip()
+    if c in COUNTRY_LABELS:
+        return f"{COUNTRY_LABELS[c]} ({c})"
+    return f"Manual ({c})"
+
+
+def parse_country_code(display_or_code: str, manual_code: str = "") -> str:
+    manual = str(manual_code).strip()
+    if manual:
+        return manual
+    raw = str(display_or_code).strip()
+    if not raw:
+        return "2"
+    if raw.isdigit():
+        return raw
+    m = re.search(r"\((\d+)\)\s*$", raw)
+    if m:
+        return m.group(1)
+    for code, label in COUNTRY_LABELS.items():
+        if raw.lower() == label.lower():
+            return code
+    return "2"
 
 
 class CTMTGuiApp:
@@ -81,7 +121,8 @@ class CTMTGuiApp:
         self.timeframe_var = tk.StringVar(value="1d")
         self.quote_var = tk.StringVar(value="USD")
         self.topn_var = tk.StringVar(value="20")
-        self.country_var = tk.StringVar(value="2")
+        self.country_var = tk.StringVar(value=country_code_to_display("2"))
+        self.country_manual_var = tk.StringVar(value="")
         self.panel_name_var = tk.StringVar(value="Panel")
 
         form = ttk.LabelFrame(left, text="Panel Config", padding=8)
@@ -91,7 +132,15 @@ class CTMTGuiApp:
         self._labeled_combo(form, "Timeframe", self.timeframe_var, ["1d", "4h", "8h", "12h"])
         self._labeled_combo(form, "Quote (crypto)", self.quote_var, ["USD", "USDT", "BTC", "ETH", "BNB"])
         self._labeled_combo(form, "Top N", self.topn_var, ["10", "20", "50", "100"])
-        self._labeled_combo(form, "Country (trad)", self.country_var, ["1", "2", "3", "4", "5"])
+        self.country_combo_live = self._labeled_combo(
+            form,
+            "Country (trad)",
+            self.country_var,
+            country_display_values(),
+            state="normal",
+            filterable=True,
+        )
+        self._labeled_entry(form, "Manual code", self.country_manual_var)
 
         btns = ttk.Frame(left)
         btns.pack(fill="x", pady=8)
@@ -122,7 +171,8 @@ class CTMTGuiApp:
         self.bt_months = tk.StringVar(value="12")
         self.bt_topn = tk.StringVar(value="20")
         self.bt_quote = tk.StringVar(value="USD")
-        self.bt_country = tk.StringVar(value="2")
+        self.bt_country = tk.StringVar(value=country_code_to_display("2"))
+        self.bt_country_manual = tk.StringVar(value="")
         self.bt_initial = tk.StringVar(value="10000")
 
         self._labeled_combo(top, "Market", self.bt_market, ["crypto", "traditional"])
@@ -130,7 +180,15 @@ class CTMTGuiApp:
         self._labeled_combo(top, "Months", self.bt_months, ["1", "3", "6", "12", "18", "24"])
         self._labeled_combo(top, "Top N", self.bt_topn, ["10", "20", "50", "100"])
         self._labeled_combo(top, "Quote (crypto)", self.bt_quote, ["USD", "USDT", "BTC", "ETH", "BNB"])
-        self._labeled_combo(top, "Country (trad)", self.bt_country, ["1", "2", "3", "4", "5"])
+        self.bt_country_combo = self._labeled_combo(
+            top,
+            "Country (trad)",
+            self.bt_country,
+            country_display_values(),
+            state="normal",
+            filterable=True,
+        )
+        self._labeled_entry(top, "Manual code", self.bt_country_manual)
         self._labeled_entry(top, "Initial USD", self.bt_initial)
         ttk.Button(top, text="Run Backtest", command=self._run_backtest).pack(side="left", padx=8)
 
@@ -163,13 +221,22 @@ class CTMTGuiApp:
         top.pack(fill="x")
         self.rs_market_scope = tk.StringVar(value="both")
         self.rs_quote = tk.StringVar(value="USD")
-        self.rs_country = tk.StringVar(value="2")
+        self.rs_country = tk.StringVar(value=country_code_to_display("2"))
+        self.rs_country_manual = tk.StringVar(value="")
         self.rs_trials = tk.StringVar(value="10")
         self.rs_jobs = tk.StringVar(value="4")
 
         self._labeled_combo(top, "Scope", self.rs_market_scope, ["crypto", "traditional", "both"])
         self._labeled_combo(top, "Quote (crypto)", self.rs_quote, ["USD", "USDT", "BTC", "ETH", "BNB"])
-        self._labeled_combo(top, "Country (trad)", self.rs_country, ["1", "2", "3", "4", "5"])
+        self.rs_country_combo = self._labeled_combo(
+            top,
+            "Country (trad)",
+            self.rs_country,
+            country_display_values(),
+            state="normal",
+            filterable=True,
+        )
+        self._labeled_entry(top, "Manual code", self.rs_country_manual)
         self._labeled_entry(top, "Trials", self.rs_trials)
         self._labeled_entry(top, "Jobs", self.rs_jobs)
         ttk.Button(top, text="Run Standard", command=self._run_standard_research).pack(side="left", padx=8)
@@ -206,11 +273,36 @@ class CTMTGuiApp:
         ttk.Label(row, text=label, width=16).pack(side="left")
         ttk.Entry(row, textvariable=var, width=18).pack(side="left")
 
-    def _labeled_combo(self, parent, label: str, var: tk.StringVar, values: List[str]) -> None:
+    def _labeled_combo(
+        self,
+        parent,
+        label: str,
+        var: tk.StringVar,
+        values: List[str],
+        state: str = "readonly",
+        filterable: bool = False,
+    ):
         row = ttk.Frame(parent)
         row.pack(fill="x", pady=2)
         ttk.Label(row, text=label, width=16).pack(side="left")
-        ttk.Combobox(row, textvariable=var, values=values, width=16, state="readonly").pack(side="left")
+        combo = ttk.Combobox(row, textvariable=var, values=values, width=24, state=state)
+        combo.pack(side="left")
+        if filterable:
+            self._bind_combo_filter(combo, values)
+        return combo
+
+    def _bind_combo_filter(self, combo: ttk.Combobox, base_values: List[str]) -> None:
+        vals = list(base_values)
+
+        def _on_key(_event):
+            q = combo.get().strip().lower()
+            if not q:
+                combo["values"] = vals
+                return
+            filt = [v for v in vals if q in v.lower()]
+            combo["values"] = filt if filt else vals
+
+        combo.bind("<KeyRelease>", _on_key)
 
     def _refresh_panel_list(self) -> None:
         self.panel_list.delete(0, tk.END)
@@ -236,10 +328,11 @@ class CTMTGuiApp:
         self.timeframe_var.set(p.timeframe)
         self.quote_var.set(p.quote_currency)
         self.topn_var.set(str(p.top_n))
-        self.country_var.set(p.country)
+        self.country_var.set(country_code_to_display(p.country))
+        self.country_manual_var.set("")
 
     def _panel_from_form(self) -> LivePanelConfig:
-        return LivePanelConfig(
+        p = LivePanelConfig(
             name=self.panel_name_var.get().strip() or "Panel",
             market=self.market_var.get().strip() or "crypto",
             timeframe=self.timeframe_var.get().strip() or "1d",
@@ -248,6 +341,11 @@ class CTMTGuiApp:
             country=self.country_var.get().strip() or "2",
             display_currency=self.display_currency_var.get().strip() or "USD",
         )
+        p.country = parse_country_code(self.country_var.get(), self.country_manual_var.get())
+        return p
+
+    def _notify_busy(self, task_name: str) -> None:
+        messagebox.showinfo("Task Running", f"A task is already running. Please wait before starting {task_name}.")
 
     def _add_panel(self) -> None:
         self.live_panels.append(self._panel_from_form())
@@ -279,6 +377,7 @@ class CTMTGuiApp:
 
     def _run_all_panels(self) -> None:
         if self.busy:
+            self._notify_busy("Run All Panels")
             return
         self.busy = True
         self.live_output.delete("1.0", tk.END)
@@ -314,6 +413,7 @@ class CTMTGuiApp:
 
     def _run_live_job(self, panel: LivePanelConfig, selected_only: bool = False) -> None:
         if self.busy:
+            self._notify_busy("Live Dashboard refresh")
             return
         self.busy = True
         if selected_only:
@@ -374,6 +474,7 @@ class CTMTGuiApp:
 
     def _run_backtest(self) -> None:
         if self.busy:
+            self._notify_busy("Backtest")
             return
         self.busy = True
         self.bt_summary.delete("1.0", tk.END)
@@ -385,7 +486,7 @@ class CTMTGuiApp:
             "months": int(self.bt_months.get() or "12"),
             "top_n": int(self.bt_topn.get() or "20"),
             "quote_currency": self.bt_quote.get(),
-            "country": self.bt_country.get(),
+            "country": parse_country_code(self.bt_country.get(), self.bt_country_manual.get()),
             "initial_capital": float(self.bt_initial.get() or "10000"),
             "display_currency": self.display_currency_var.get() or "USD",
         }
@@ -406,6 +507,7 @@ class CTMTGuiApp:
 
     def _run_ai_analysis(self) -> None:
         if self.busy:
+            self._notify_busy("AI Analysis")
             return
         self.busy = True
         self.ai_output.delete("1.0", tk.END)
@@ -446,6 +548,7 @@ class CTMTGuiApp:
 
     def _run_research_job(self, standard: bool) -> None:
         if self.busy:
+            self._notify_busy("Auto-Research")
             return
         self.busy = True
         self.rs_output.delete("1.0", tk.END)
@@ -469,7 +572,7 @@ class CTMTGuiApp:
         include_crypto = scope in ("crypto", "both")
         include_trad = scope in ("traditional", "both")
         quote = self.rs_quote.get().strip().upper() or "USD"
-        country = self.rs_country.get().strip() or "2"
+        country = parse_country_code(self.rs_country.get(), self.rs_country_manual.get())
         tfs = ["1d", "4h", "8h", "12h"]
         months = [1, 3, 6, 12, 18, 24]
         scenarios: List[Dict[str, Any]] = []
@@ -577,4 +680,3 @@ def run_gui() -> None:
 
 if __name__ == "__main__":
     run_gui()
-
