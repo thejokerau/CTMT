@@ -117,22 +117,14 @@ class CTMTGuiApp:
 
         self.nb = ttk.Notebook(self.root)
         self.nb.pack(fill="both", expand=True)
-
-        self.live_tab = ttk.Frame(self.nb)
-        self.backtest_tab = ttk.Frame(self.nb)
-        self.ai_tab = ttk.Frame(self.nb)
-        self.portfolio_tab = ttk.Frame(self.nb)
-        self.research_tab = ttk.Frame(self.nb)
-        self.task_tab = ttk.Frame(self.nb)
-        self.settings_tab = ttk.Frame(self.nb)
-
-        self.nb.add(self.live_tab, text="Live Dashboard")
-        self.nb.add(self.backtest_tab, text="Backtest")
-        self.nb.add(self.ai_tab, text="AI Analysis")
-        self.nb.add(self.portfolio_tab, text="Portfolio & Ledger")
-        self.nb.add(self.research_tab, text="Auto-Research")
-        self.nb.add(self.task_tab, text="Task Monitor")
-        self.nb.add(self.settings_tab, text="Settings")
+        self._tab_scroll_canvases: Dict[str, tk.Canvas] = {}
+        self.live_tab = self._create_scrollable_tab("Live Dashboard", "live")
+        self.backtest_tab = self._create_scrollable_tab("Backtest", "backtest")
+        self.ai_tab = self._create_scrollable_tab("AI Analysis", "ai")
+        self.portfolio_tab = self._create_scrollable_tab("Portfolio & Ledger", "portfolio")
+        self.research_tab = self._create_scrollable_tab("Auto-Research", "research")
+        self.task_tab = self._create_scrollable_tab("Task Monitor", "task")
+        self.settings_tab = self._create_scrollable_tab("Settings", "settings")
 
         self._build_live_tab()
         self._build_backtest_tab()
@@ -142,6 +134,40 @@ class CTMTGuiApp:
         self._build_task_tab()
         self._build_settings_tab()
         self._build_status_bar()
+
+    def _create_scrollable_tab(self, title: str, key: str) -> ttk.Frame:
+        container = ttk.Frame(self.nb)
+        canvas = tk.Canvas(container, highlightthickness=0)
+        ybar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        xbar = ttk.Scrollbar(container, orient="horizontal", command=canvas.xview)
+        canvas.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        inner = ttk.Frame(canvas)
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _sync_scrollregion(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_resize(event):
+            try:
+                req_w = inner.winfo_reqwidth()
+            except Exception:
+                req_w = event.width
+            target_w = event.width if req_w <= event.width else req_w
+            canvas.itemconfigure(window_id, width=target_w)
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        inner.bind("<Configure>", _sync_scrollregion)
+        canvas.bind("<Configure>", _on_canvas_resize)
+
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        ybar.grid(row=0, column=1, sticky="ns")
+        xbar.grid(row=1, column=0, sticky="ew")
+
+        self.nb.add(container, text=title)
+        self._tab_scroll_canvases[key] = canvas
+        return inner
 
     def _build_status_bar(self) -> None:
         bar = ttk.Frame(self.root, padding=(8, 4))
@@ -429,16 +455,18 @@ class CTMTGuiApp:
             self.pending_tree.heading(c, text=c.upper())
             self.pending_tree.column(c, width=w, anchor="w")
         pending_tree_frame.pack(fill="x", expand=False)
-        pending_btns = ttk.Frame(pending_frame)
-        pending_btns.pack(fill="x", pady=(6, 0))
-        ttk.Label(pending_btns, text="Set qty").pack(side="left")
-        ttk.Entry(pending_btns, textvariable=self.pf_pending_qty_var, width=10).pack(side="left", padx=4)
-        ttk.Label(pending_btns, text="type").pack(side="left")
-        ttk.Combobox(pending_btns, textvariable=self.pf_pending_type_var, values=["MARKET", "LIMIT"], width=8, state="readonly").pack(side="left", padx=4)
-        ttk.Button(pending_btns, text="Apply to Selected", command=self._apply_pending_edit_to_selected).pack(side="left", padx=6)
-        ttk.Button(pending_btns, text="Submit Selected", command=self._submit_selected_pending_orders).pack(side="left")
-        ttk.Button(pending_btns, text="Remove Selected", command=self._remove_selected_pending_orders).pack(side="left", padx=6)
-        ttk.Button(pending_btns, text="Clear All", command=self._clear_pending_recommendations).pack(side="left")
+        pending_btns_row1 = ttk.Frame(pending_frame)
+        pending_btns_row1.pack(fill="x", pady=(6, 2))
+        ttk.Label(pending_btns_row1, text="Set qty").pack(side="left")
+        ttk.Entry(pending_btns_row1, textvariable=self.pf_pending_qty_var, width=10).pack(side="left", padx=4)
+        ttk.Label(pending_btns_row1, text="type").pack(side="left")
+        ttk.Combobox(pending_btns_row1, textvariable=self.pf_pending_type_var, values=["MARKET", "LIMIT"], width=8, state="readonly").pack(side="left", padx=4)
+        ttk.Button(pending_btns_row1, text="Apply to Selected", command=self._apply_pending_edit_to_selected).pack(side="left", padx=6)
+        pending_btns_row2 = ttk.Frame(pending_frame)
+        pending_btns_row2.pack(fill="x")
+        ttk.Button(pending_btns_row2, text="Submit Selected", command=self._submit_selected_pending_orders).pack(side="left")
+        ttk.Button(pending_btns_row2, text="Remove Selected", command=self._remove_selected_pending_orders).pack(side="left", padx=6)
+        ttk.Button(pending_btns_row2, text="Clear All", command=self._clear_pending_recommendations).pack(side="left")
 
         manual = ttk.LabelFrame(self.portfolio_tab, text="Manual Ledger Event", padding=8)
         manual.pack(fill="x", padx=8, pady=(0, 8))

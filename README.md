@@ -105,6 +105,7 @@ Live Dashboard preset management:
 GUI dashboard readability:
 
 - Live/Backtest text outputs now apply color highlighting for key sections and action states (`BUY/HOLD/SELL`) to improve scanability.
+- Major GUI tabs now support both vertical and horizontal scrolling at tab level, improving access to full config/action areas on smaller screens.
 
 GUI AI configuration:
 
