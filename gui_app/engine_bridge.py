@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.parse
 from contextlib import redirect_stderr, redirect_stdout
+from decimal import Decimal, ROUND_DOWN, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,6 +34,7 @@ class EngineBridge:
         self.nightly_path = repo_root / "nightly" / "BTC-beta.py"
         self.scripts_dir = repo_root / "scripts"
         self._lock = threading.Lock()
+        self._binance_exchange_info_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         self.mod = self._load_nightly_module()
         self.mod.ensure_table()
 
@@ -501,6 +503,188 @@ class EngineBridge:
     def _signed_binance_get(self, endpoint: str, path: str, api_key: str, api_secret: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self._signed_binance_request("GET", endpoint, path, api_key, api_secret, params=params)
 
+    @staticmethod
+    def _to_decimal(v: Any, default: str = "0") -> Decimal:
+        try:
+            return Decimal(str(v))
+        except (InvalidOperation, ValueError, TypeError):
+            return Decimal(default)
+
+    @staticmethod
+    def _round_to_step(value: Decimal, step: Decimal) -> Decimal:
+        if step <= Decimal("0"):
+            return value
+        # Floor to allowed increment.
+        units = (value / step).to_integral_value(rounding=ROUND_DOWN)
+        return units * step
+
+    def _get_symbol_exchange_info(self, endpoint: str, symbol: str, ttl_seconds: int = 300) -> Optional[Dict[str, Any]]:
+        sym = str(symbol).strip().upper()
+        if not sym:
+            return None
+        key = f"{endpoint.rstrip('/')}|{sym}"
+        now = time.time()
+        cached = self._binance_exchange_info_cache.get(key)
+        if cached:
+            ts, payload = cached
+            if now - float(ts) <= max(5, int(ttl_seconds)):
+                return payload
+        try:
+            url = endpoint.rstrip("/") + "/api/v3/exchangeInfo"
+            r = requests.get(url, params={"symbol": sym}, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+            symbols = data.get("symbols", []) if isinstance(data, dict) else []
+            if not isinstance(symbols, list) or not symbols:
+                return None
+            payload = symbols[0] if isinstance(symbols[0], dict) else None
+            if payload:
+                self._binance_exchange_info_cache[key] = (now, payload)
+            return payload
+        except Exception:
+            return None
+
+    def _get_last_price(self, endpoint: str, symbol: str) -> Optional[Decimal]:
+        sym = str(symbol).strip().upper()
+        if not sym:
+            return None
+        try:
+            url = endpoint.rstrip("/") + "/api/v3/ticker/price"
+            r = requests.get(url, params={"symbol": sym}, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            if not isinstance(data, dict):
+                return None
+            px = self._to_decimal(data.get("price", "0"))
+            if px > Decimal("0"):
+                return px
+            return None
+        except Exception:
+            return None
+
+    def validate_binance_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: float,
+        profile_name: Optional[str] = None,
+        price: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        sym = str(symbol).strip().upper()
+        s = str(side).strip().upper()
+        t = str(order_type).strip().upper()
+        if not sym or s not in ("BUY", "SELL"):
+            return {"ok": False, "error": "Valid symbol and side (BUY/SELL) are required."}
+        if t not in ("MARKET", "LIMIT"):
+            return {"ok": False, "error": "order_type must be MARKET or LIMIT."}
+
+        qty = self._to_decimal(quantity)
+        if qty <= Decimal("0"):
+            return {"ok": False, "error": "Quantity must be > 0."}
+
+        _, profile, _, err = self._resolve_active_binance_profile(profile_name)
+        if err:
+            return {"ok": False, "error": err}
+        endpoint = str((profile or {}).get("endpoint", self._default_binance_endpoint()) or self._default_binance_endpoint())
+
+        info = self._get_symbol_exchange_info(endpoint, sym)
+        if not info:
+            return {"ok": False, "error": f"Unable to load exchange info for {sym}."}
+        filters = info.get("filters", []) if isinstance(info, dict) else []
+        if not isinstance(filters, list):
+            filters = []
+
+        f_map: Dict[str, Dict[str, Any]] = {}
+        for f in filters:
+            if isinstance(f, dict):
+                k = str(f.get("filterType", "")).strip()
+                if k:
+                    f_map[k] = f
+
+        lot = f_map.get("LOT_SIZE", {})
+        market_lot = f_map.get("MARKET_LOT_SIZE", {})
+        price_f = f_map.get("PRICE_FILTER", {})
+        min_notional_f = f_map.get("MIN_NOTIONAL", {})
+        notional_f = f_map.get("NOTIONAL", {})
+
+        lot_filter = market_lot if t == "MARKET" and market_lot else lot
+        min_qty = self._to_decimal(lot_filter.get("minQty", "0"))
+        max_qty = self._to_decimal(lot_filter.get("maxQty", "0"))
+        step_qty = self._to_decimal(lot_filter.get("stepSize", "0"))
+
+        norm_qty = self._round_to_step(qty, step_qty) if step_qty > Decimal("0") else qty
+        if norm_qty <= Decimal("0"):
+            return {"ok": False, "error": f"Quantity too small after step-size normalization (step {step_qty})."}
+        if min_qty > Decimal("0") and norm_qty < min_qty:
+            return {"ok": False, "error": f"Quantity {norm_qty} below minQty {min_qty}."}
+        if max_qty > Decimal("0") and norm_qty > max_qty:
+            return {"ok": False, "error": f"Quantity {norm_qty} above maxQty {max_qty}."}
+
+        norm_price: Optional[Decimal] = None
+        if t == "LIMIT":
+            p = self._to_decimal(price or 0)
+            if p <= Decimal("0"):
+                return {"ok": False, "error": "Limit orders require positive price."}
+            tick = self._to_decimal(price_f.get("tickSize", "0"))
+            min_p = self._to_decimal(price_f.get("minPrice", "0"))
+            max_p = self._to_decimal(price_f.get("maxPrice", "0"))
+            norm_price = self._round_to_step(p, tick) if tick > Decimal("0") else p
+            if min_p > Decimal("0") and norm_price < min_p:
+                return {"ok": False, "error": f"Price {norm_price} below minPrice {min_p}."}
+            if max_p > Decimal("0") and norm_price > max_p:
+                return {"ok": False, "error": f"Price {norm_price} above maxPrice {max_p}."}
+
+        # Notional checks (order value).
+        check_price = norm_price
+        if check_price is None:
+            check_price = self._get_last_price(endpoint, sym)
+        if check_price is not None and check_price > Decimal("0"):
+            notion = norm_qty * check_price
+            min_notional = Decimal("0")
+            max_notional = Decimal("0")
+            apply_min = True
+            apply_max = False
+
+            if isinstance(min_notional_f, dict) and min_notional_f:
+                min_notional = self._to_decimal(min_notional_f.get("minNotional", "0"))
+                if t == "MARKET":
+                    apply_min = bool(min_notional_f.get("applyToMarket", True))
+            if isinstance(notional_f, dict) and notional_f:
+                mn = self._to_decimal(notional_f.get("minNotional", "0"))
+                mx = self._to_decimal(notional_f.get("maxNotional", "0"))
+                if mn > Decimal("0"):
+                    min_notional = mn
+                if mx > Decimal("0"):
+                    max_notional = mx
+                if t == "MARKET":
+                    apply_min = bool(notional_f.get("applyMinToMarket", True))
+                    apply_max = bool(notional_f.get("applyMaxToMarket", False))
+                else:
+                    apply_min = True
+                    apply_max = max_notional > Decimal("0")
+
+            if apply_min and min_notional > Decimal("0") and notion < min_notional:
+                return {
+                    "ok": False,
+                    "error": f"Order notional {notion:.8f} below minNotional {min_notional}. Increase quantity.",
+                }
+            if apply_max and max_notional > Decimal("0") and notion > max_notional:
+                return {
+                    "ok": False,
+                    "error": f"Order notional {notion:.8f} above maxNotional {max_notional}. Reduce quantity.",
+                }
+
+        return {
+            "ok": True,
+            "symbol": sym,
+            "side": s,
+            "order_type": t,
+            "normalized_quantity": float(norm_qty),
+            "normalized_price": (float(norm_price) if norm_price is not None else None),
+            "note": "Validated against Binance symbol filters.",
+        }
+
     def list_binance_profiles(self) -> Dict[str, Any]:
         with self._lock:
             prefs = load_binance_preferences()
@@ -825,19 +1009,21 @@ class EngineBridge:
         time_in_force: str = "GTC",
     ) -> Dict[str, Any]:
         with self._lock:
-            sym = str(symbol).strip().upper()
-            s = str(side).strip().upper()
-            t = str(order_type).strip().upper()
-            if not sym or s not in ("BUY", "SELL"):
-                return {"ok": False, "error": "Valid symbol and side (BUY/SELL) are required."}
-            if t not in ("MARKET", "LIMIT"):
-                return {"ok": False, "error": "order_type must be MARKET or LIMIT."}
-            try:
-                qty = float(quantity)
-            except Exception:
-                qty = 0.0
-            if qty <= 0:
-                return {"ok": False, "error": "Quantity must be > 0."}
+            v = self.validate_binance_order(
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                quantity=quantity,
+                profile_name=profile_name,
+                price=price,
+            )
+            if not v.get("ok"):
+                return {"ok": False, "error": v.get("error", "Binance order validation failed.")}
+            sym = str(v.get("symbol", "")).upper()
+            s = str(v.get("side", "")).upper()
+            t = str(v.get("order_type", "")).upper()
+            qty = float(v.get("normalized_quantity", 0.0) or 0.0)
+            px_norm = v.get("normalized_price", None)
             active, profile, creds, err = self._resolve_active_binance_profile(profile_name)
             if err:
                 return {"ok": False, "error": err}
@@ -850,7 +1036,7 @@ class EngineBridge:
             }
             if t == "LIMIT":
                 try:
-                    px = float(price or 0.0)
+                    px = float(px_norm if px_norm is not None else (price or 0.0))
                 except Exception:
                     px = 0.0
                 if px <= 0:
@@ -867,7 +1053,13 @@ class EngineBridge:
             )
             if not out.get("ok"):
                 return {"ok": False, "status": out.get("status"), "error": out.get("error", "order submit failed")}
-            return {"ok": True, "profile": active, "data": out.get("data", {})}
+            return {
+                "ok": True,
+                "profile": active,
+                "data": out.get("data", {}),
+                "normalized_quantity": qty,
+                "normalized_price": px_norm,
+            }
 
     def get_trade_ledger(self) -> Dict[str, Any]:
         with self._lock:

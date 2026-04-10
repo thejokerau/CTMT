@@ -129,6 +129,11 @@ GUI Portfolio & Ledger:
   - AI recommendation staging queue with selective approval/submit flow
   - open Binance order list + cancel selected orders from GUI
   - execution modes: `manual`, `semi_auto`, `full_auto` (mode-controlled behavior)
+  - Binance pre-submit order validation against exchange filters:
+    - quantity step size / min-max qty
+    - limit-price tick size / min-max price
+    - notional constraints (`MIN_NOTIONAL`/`NOTIONAL`)
+    - auto-normalization (round-down to valid increment) before submit
 - Binance profiles can be managed in GUI Settings (similar to AI profiles):
   - create/update/set active/delete profile
   - secure key+secret storage outside repo

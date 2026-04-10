@@ -1824,6 +1824,12 @@ class CTMTGuiApp:
                 failed += 1
                 continue
             rec["status"] = "SUBMITTED"
+            nq = out.get("normalized_quantity", None)
+            npv = out.get("normalized_price", None)
+            if nq is not None:
+                rec["quantity"] = float(nq)
+            if npv is not None:
+                rec["reason"] = f"{rec.get('reason','')} | normalized px={npv}"
             submitted += 1
             self.bridge.record_signal_event(
                 {

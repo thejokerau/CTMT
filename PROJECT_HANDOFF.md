@@ -218,6 +218,11 @@
 - Added open-order trade controls in GUI:
   - fetch Binance open orders
   - cancel selected open orders directly from GUI
+- Added Binance pre-submit order hardening:
+  - validates quantity against step/min/max filters
+  - validates limit price against tick/min/max filters
+  - validates notional against `MIN_NOTIONAL` / `NOTIONAL` constraints
+  - normalizes qty/price to exchange-valid increments before order submission
 - Moved dashboard preset workflow into Live Dashboard tab:
   - save/update from selected panels
   - save/update from all panels
@@ -291,7 +296,7 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-10T06:34:38+00:00
+- Last update UTC: 2026-04-10T06:40:28+00:00
 - Latest experiment artifact: `experiments/runs/run_20260410T031732Z.json`
 - Champion scenarios tracked: 4
 - Latest run summary:
