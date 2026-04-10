@@ -175,6 +175,9 @@
   - set/remove stored API key from GUI
   - run profile-level connectivity test from GUI
   - GUI uses same user-local preference/secret files as nightly CLI
+- Added GUI task monitor method:
+  - status-bar `Tasks` button now shows currently running tasks and queued tasks
+  - supports operational visibility while parallel mode and queueing are active
 
 ## Current Files of Interest
 - `nightly/BTC-beta.py`
@@ -236,7 +239,7 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-10T02:32:18+00:00
+- Last update UTC: 2026-04-10T02:39:32+00:00
 - Latest experiment artifact: `experiments/runs/run_20260410T020023Z.json`
 - Champion scenarios tracked: 4
 - Latest run summary:

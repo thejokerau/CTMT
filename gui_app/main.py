@@ -77,6 +77,7 @@ class CTMTGuiApp:
         self.auto_refresh_running = False
         self.busy = False
         self.running_tasks = 0
+        self.running_task_names: List[str] = []
         self.task_queue = deque()
         self.ai_last_source_text = ""
         self.ai_conversation: List[Dict[str, str]] = []
@@ -121,6 +122,7 @@ class CTMTGuiApp:
         self.status_var = tk.StringVar(value="Ready")
         self.status_label = ttk.Label(bar, textvariable=self.status_var)
         self.status_label.pack(side="left")
+        ttk.Button(bar, text="Tasks", command=self._show_task_status).pack(side="right", padx=(8, 0))
         self.status_progress = ttk.Progressbar(bar, mode="indeterminate", length=180)
         self.status_progress.pack(side="right")
 
@@ -509,8 +511,13 @@ class CTMTGuiApp:
     def _set_busy(self, busy: bool, task_name: str = "") -> None:
         if busy:
             self.running_tasks += 1
+            self.running_task_names.append(task_name or "Task")
         else:
             self.running_tasks = max(0, self.running_tasks - 1)
+            if task_name and task_name in self.running_task_names:
+                self.running_task_names.remove(task_name)
+            elif self.running_task_names:
+                self.running_task_names.pop(0)
         self.busy = self.running_tasks > 0
         limit = self._task_limit()
         disable = self.running_tasks > 0 and limit <= 1
@@ -568,6 +575,31 @@ class CTMTGuiApp:
         else:
             self.status_progress.stop()
             self.status_var.set("Ready")
+
+    def _task_snapshot(self) -> Dict[str, List[str]]:
+        running = list(self.running_task_names)
+        queued = [str(item[0]) for item in list(self.task_queue)]
+        return {"running": running, "queued": queued}
+
+    def _show_task_status(self) -> None:
+        snap = self._task_snapshot()
+        running = snap["running"]
+        queued = snap["queued"]
+        lines: List[str] = []
+        lines.append("Current Running Tasks:")
+        if running:
+            for i, name in enumerate(running, 1):
+                lines.append(f"{i}. {name}")
+        else:
+            lines.append("None")
+        lines.append("")
+        lines.append("Queued Tasks:")
+        if queued:
+            for i, name in enumerate(queued, 1):
+                lines.append(f"{i}. {name}")
+        else:
+            lines.append("None")
+        messagebox.showinfo("Task Monitor", "\n".join(lines))
 
     def _bridge_for_task(self) -> EngineBridge:
         if self._task_limit() <= 1:
