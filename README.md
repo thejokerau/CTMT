@@ -158,6 +158,7 @@ GUI traditional-region UX:
 - Built-in AI analysis mode:
   - paste full raw dashboard text and generate a Grok-ready analysis prompt
   - optional direct call to active AI provider profile (cloud or local)
+  - prompt now requests a simple short-term vs long-term entry/exit/invalidation guide
   - saves prompt/response artifacts under `experiments/grok/`
 - Multi-provider AI integration:
   - xAI, OpenAI, Anthropic, Ollama, OpenAI-compatible, OpenClaw
