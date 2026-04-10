@@ -83,7 +83,12 @@ GUI task execution:
 
 - Default mode runs one active task at a time (additional tasks are queued).
 - Optional `Advanced Mode: Parallel jobs (experimental)` can be enabled in GUI Settings to allow limited concurrent jobs.
-- Use the `Tasks` button in the GUI status bar to open a live Task Monitor window (auto-refreshes every second) showing running and queued tasks.
+- Use the top `Tasks` button or the `Task Monitor` tab to view task status.
+- `Task Monitor` tab supports:
+  - live running/queued visibility
+  - pause/resume queue
+  - remove queued task
+  - queued task reprioritization (move up/down)
 
 GUI AI configuration:
 

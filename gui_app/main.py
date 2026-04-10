@@ -79,6 +79,7 @@ class CTMTGuiApp:
         self.running_tasks = 0
         self.running_task_names: List[str] = []
         self.task_queue = deque()
+        self.queue_paused = False
         self.ai_last_source_text = ""
         self.ai_conversation: List[Dict[str, str]] = []
         self.task_monitor_window: Optional[tk.Toplevel] = None
@@ -97,6 +98,10 @@ class CTMTGuiApp:
         self._update_run_controls_and_status()
 
     def _build_ui(self) -> None:
+        topbar = ttk.Frame(self.root, padding=(8, 4))
+        topbar.pack(side="top", fill="x")
+        ttk.Button(topbar, text="Tasks", command=self._open_task_monitor_tab).pack(side="right")
+
         self.nb = ttk.Notebook(self.root)
         self.nb.pack(fill="both", expand=True)
 
@@ -104,18 +109,21 @@ class CTMTGuiApp:
         self.backtest_tab = ttk.Frame(self.nb)
         self.ai_tab = ttk.Frame(self.nb)
         self.research_tab = ttk.Frame(self.nb)
+        self.task_tab = ttk.Frame(self.nb)
         self.settings_tab = ttk.Frame(self.nb)
 
         self.nb.add(self.live_tab, text="Live Dashboard")
         self.nb.add(self.backtest_tab, text="Backtest")
         self.nb.add(self.ai_tab, text="AI Analysis")
         self.nb.add(self.research_tab, text="Auto-Research")
+        self.nb.add(self.task_tab, text="Task Monitor")
         self.nb.add(self.settings_tab, text="Settings")
 
         self._build_live_tab()
         self._build_backtest_tab()
         self._build_ai_tab()
         self._build_research_tab()
+        self._build_task_tab()
         self._build_settings_tab()
         self._build_status_bar()
 
@@ -349,6 +357,35 @@ class CTMTGuiApp:
         self.rs_output = tk.Text(self.research_tab, wrap="word")
         self.rs_output.pack(fill="both", expand=True, padx=8, pady=8)
 
+    def _build_task_tab(self) -> None:
+        top = ttk.Frame(self.task_tab, padding=8)
+        top.pack(fill="x")
+        body = ttk.Frame(self.task_tab, padding=8)
+        body.pack(fill="both", expand=True)
+
+        ttk.Button(top, text="Refresh", command=self._refresh_task_tab).pack(side="left")
+        self.btn_pause_queue = ttk.Button(top, text="Pause Queue", command=self._toggle_queue_pause)
+        self.btn_pause_queue.pack(side="left", padx=4)
+        ttk.Button(top, text="Stop/Remove Selected", command=self._stop_selected_task).pack(side="left")
+        ttk.Button(top, text="Move Up", command=lambda: self._reprioritize_queue(-1)).pack(side="left", padx=4)
+        ttk.Button(top, text="Move Down", command=lambda: self._reprioritize_queue(1)).pack(side="left")
+
+        cols = ttk.Frame(body)
+        cols.pack(fill="both", expand=True)
+        left = ttk.LabelFrame(cols, text="Running", padding=6)
+        right = ttk.LabelFrame(cols, text="Queued", padding=6)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        right.pack(side="left", fill="both", expand=True)
+
+        self.running_list = tk.Listbox(left, height=12)
+        self.running_list.pack(fill="both", expand=True)
+        self.queued_list = tk.Listbox(right, height=12)
+        self.queued_list.pack(fill="both", expand=True)
+
+        self.task_tab_output = tk.Text(body, height=8, wrap="word")
+        self.task_tab_output.pack(fill="x", pady=(8, 0))
+        self._refresh_task_tab()
+
     def _build_settings_tab(self) -> None:
         frame = ttk.Frame(self.settings_tab, padding=8)
         frame.pack(fill="both", expand=True)
@@ -536,7 +573,7 @@ class CTMTGuiApp:
             btn = getattr(self, btn_name, None)
             if btn is not None:
                 btn.configure(state=run_state)
-        if (not busy) and self.task_queue and self.running_tasks < limit:
+        if (not busy) and (not self.queue_paused) and self.task_queue and self.running_tasks < limit:
             slots = limit - self.running_tasks
             for _ in range(min(slots, len(self.task_queue))):
                 next_name, next_job = self.task_queue.popleft()
@@ -578,6 +615,7 @@ class CTMTGuiApp:
         else:
             self.status_progress.stop()
             self.status_var.set("Ready")
+        self._refresh_task_tab()
 
     def _task_snapshot(self) -> Dict[str, List[str]]:
         running = list(self.running_task_names)
@@ -604,6 +642,10 @@ class CTMTGuiApp:
 
         win.protocol("WM_DELETE_WINDOW", self._close_task_monitor)
         self._refresh_task_monitor()
+
+    def _open_task_monitor_tab(self) -> None:
+        self.nb.select(self.task_tab)
+        self._refresh_task_tab()
 
     def _refresh_task_monitor(self) -> None:
         if self.task_monitor_window is None or not self.task_monitor_window.winfo_exists():
@@ -649,6 +691,63 @@ class CTMTGuiApp:
             self.task_monitor_window.destroy()
         self.task_monitor_window = None
         self.task_monitor_text = None
+
+    def _refresh_task_tab(self) -> None:
+        if not hasattr(self, "running_list") or not hasattr(self, "queued_list"):
+            return
+        self.running_list.delete(0, tk.END)
+        for i, name in enumerate(self.running_task_names, 1):
+            self.running_list.insert(tk.END, f"{i}. {name}")
+        self.queued_list.delete(0, tk.END)
+        for i, item in enumerate(list(self.task_queue), 1):
+            qname = str(item[0])
+            self.queued_list.insert(tk.END, f"{i}. {qname}")
+        if hasattr(self, "btn_pause_queue"):
+            self.btn_pause_queue.configure(text="Resume Queue" if self.queue_paused else "Pause Queue")
+        if hasattr(self, "task_tab_output"):
+            self.task_tab_output.delete("1.0", tk.END)
+            self.task_tab_output.insert(
+                "1.0",
+                f"Running: {self.running_tasks}/{self._task_limit()} | Queued: {len(self.task_queue)} | Queue paused: {self.queue_paused}",
+            )
+
+    def _toggle_queue_pause(self) -> None:
+        self.queue_paused = not self.queue_paused
+        self._refresh_task_tab()
+        if (not self.queue_paused) and self.running_tasks < self._task_limit() and self.task_queue:
+            self._set_busy(False, task_name="Queue resumed")
+
+    def _stop_selected_task(self) -> None:
+        qsel = self.queued_list.curselection() if hasattr(self, "queued_list") else ()
+        if qsel:
+            idx = int(qsel[0])
+            items = list(self.task_queue)
+            if 0 <= idx < len(items):
+                removed = items.pop(idx)
+                self.task_queue = deque(items)
+                self._append_settings(f"Removed queued task: {removed[0]}")
+                self._refresh_task_tab()
+                return
+        rsel = self.running_list.curselection() if hasattr(self, "running_list") else ()
+        if rsel:
+            messagebox.showinfo("Task Control", "Stopping active running tasks is not supported yet. You can remove queued tasks.")
+            return
+        messagebox.showinfo("Task Control", "Select a queued or running task first.")
+
+    def _reprioritize_queue(self, direction: int) -> None:
+        qsel = self.queued_list.curselection() if hasattr(self, "queued_list") else ()
+        if not qsel:
+            messagebox.showinfo("Queue Priority", "Select a queued task first.")
+            return
+        idx = int(qsel[0])
+        items = list(self.task_queue)
+        new_idx = idx + int(direction)
+        if new_idx < 0 or new_idx >= len(items):
+            return
+        items[idx], items[new_idx] = items[new_idx], items[idx]
+        self.task_queue = deque(items)
+        self._refresh_task_tab()
+        self.queued_list.selection_set(new_idx)
 
     def _bridge_for_task(self) -> EngineBridge:
         if self._task_limit() <= 1:
