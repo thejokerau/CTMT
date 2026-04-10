@@ -168,6 +168,13 @@
   - configurable max concurrent jobs
   - task scheduler now queues when saturated and starts queued jobs automatically
   - per-task bridge instantiation in parallel mode to avoid single-bridge serialization
+- Added GUI-native AI profile management (parity move from CLI-only setup):
+  - list/refresh profiles and active profile visibility
+  - create/update profile fields (provider/model/endpoint/internet/temperature)
+  - set active profile and delete profile
+  - set/remove stored API key from GUI
+  - run profile-level connectivity test from GUI
+  - GUI uses same user-local preference/secret files as nightly CLI
 
 ## Current Files of Interest
 - `nightly/BTC-beta.py`
@@ -208,6 +215,7 @@
 - GUI currently uses text-first output panes; richer native tables/charts and embedded chart views are pending.
 - Branch sync helper is workflow guidance/tooling, not an enforced git hook; manual execution is still required before promotion.
 - GUI parallel mode is experimental; concurrent cache writes may still hit transient SQLite lock contention in high-load scenarios.
+- GUI AI profile test is synchronous today (single request path); very slow endpoints may briefly stall UI if repeatedly tested.
 
 ## Run / Validate
 - Syntax check:
@@ -228,7 +236,7 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-10T02:20:58+00:00
+- Last update UTC: 2026-04-10T02:32:18+00:00
 - Latest experiment artifact: `experiments/runs/run_20260410T020023Z.json`
 - Champion scenarios tracked: 4
 - Latest run summary:

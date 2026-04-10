@@ -84,6 +84,16 @@ GUI task execution:
 - Default mode runs one active task at a time (additional tasks are queued).
 - Optional `Advanced Mode: Parallel jobs (experimental)` can be enabled in GUI Settings to allow limited concurrent jobs.
 
+GUI AI configuration:
+
+- AI profiles can now be managed directly in GUI Settings:
+  - list/select profile
+  - update provider/model/endpoint/internet mode/temperature
+  - set active profile
+  - store/remove API key securely
+  - test profile connectivity
+- GUI uses the same user-local secure preference/secret files as CLI mode.
+
 GUI traditional-region UX:
 
 - Country selector now uses readable region names (not numeric-only codes).

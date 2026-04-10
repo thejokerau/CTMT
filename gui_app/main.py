@@ -32,6 +32,8 @@ COUNTRY_LABELS = {
     "6": "Other / Manual",
 }
 
+AI_PROVIDER_OPTIONS = ["xai", "openai", "anthropic", "ollama", "openai_compatible", "openclaw"]
+
 
 def country_display_values() -> List[str]:
     return [f"{name} ({code})" for code, name in COUNTRY_LABELS.items()]
@@ -366,12 +368,44 @@ class CTMTGuiApp:
         ttk.Button(dash_frame, text="Load Profile", command=self._load_dashboard_profile).pack(fill="x", pady=2)
         ttk.Button(dash_frame, text="Delete Profile", command=self._delete_dashboard_profile).pack(fill="x", pady=2)
 
-        ttk.Button(frame, text="Open AI Provider Settings (CLI)", command=self._show_ai_settings_hint).pack(fill="x", pady=4)
+        ai_frame = ttk.LabelFrame(frame, text="AI Profiles", padding=8)
+        ai_frame.pack(fill="x", pady=8)
+        self.ai_profile_var = tk.StringVar(value="")
+        self.ai_provider_var = tk.StringVar(value="xai")
+        self.ai_model_var = tk.StringVar(value="")
+        self.ai_endpoint_var = tk.StringVar(value="")
+        self.ai_internet_var = tk.BooleanVar(value=True)
+        self.ai_temp_var = tk.StringVar(value="0.2")
+        self.ai_key_var = tk.StringVar(value="")
+
+        self.ai_profile_combo = self._labeled_combo(ai_frame, "Profile", self.ai_profile_var, [], state="readonly")
+        self._labeled_combo(ai_frame, "Provider", self.ai_provider_var, AI_PROVIDER_OPTIONS, state="readonly")
+        self._labeled_entry(ai_frame, "Model", self.ai_model_var)
+        self._labeled_entry(ai_frame, "Endpoint", self.ai_endpoint_var)
+        self._labeled_entry(ai_frame, "Temperature", self.ai_temp_var)
+        key_row = ttk.Frame(ai_frame)
+        key_row.pack(fill="x", pady=2)
+        ttk.Label(key_row, text="API key", width=16).pack(side="left")
+        ttk.Entry(key_row, textvariable=self.ai_key_var, show="*", width=32).pack(side="left")
+        ttk.Checkbutton(ai_frame, text="Internet-enabled profile", variable=self.ai_internet_var).pack(anchor="w")
+
+        ai_btns = ttk.Frame(ai_frame)
+        ai_btns.pack(fill="x", pady=4)
+        ttk.Button(ai_btns, text="Refresh", command=self._refresh_ai_profiles).pack(side="left")
+        ttk.Button(ai_btns, text="Save Profile", command=self._save_ai_profile_from_form).pack(side="left", padx=4)
+        ttk.Button(ai_btns, text="Set Active", command=self._set_active_ai_profile_from_form).pack(side="left")
+        ttk.Button(ai_btns, text="Delete", command=self._delete_ai_profile_from_form).pack(side="left", padx=4)
+        ttk.Button(ai_btns, text="Set Key", command=self._set_ai_key_from_form).pack(side="left")
+        ttk.Button(ai_btns, text="Remove Key", command=self._remove_ai_key_from_form).pack(side="left", padx=4)
+        ttk.Button(ai_btns, text="Test", command=self._test_ai_profile_from_form).pack(side="left")
+
         ttk.Button(frame, text="Save Settings", command=self._persist_state).pack(fill="x")
 
         self.settings_output = tk.Text(frame, height=8, wrap="word")
         self.settings_output.pack(fill="both", expand=True, pady=(8, 0))
         self._append_settings("Settings are stored under %USERPROFILE%\\.ctmt\\gui\\gui_state.json")
+        self.ai_profile_combo.bind("<<ComboboxSelected>>", lambda _e: self._load_ai_profile_into_form())
+        self._refresh_ai_profiles()
 
     def _labeled_entry(self, parent, label: str, var: tk.StringVar) -> None:
         row = ttk.Frame(parent)
@@ -1020,6 +1054,129 @@ class CTMTGuiApp:
             self._append_settings(f"Deleted dashboard profile: {name}")
         else:
             self._append_settings(f"Profile not found: {name}")
+
+    def _refresh_ai_profiles(self) -> None:
+        res = self.bridge.list_ai_profiles()
+        if not res.get("ok"):
+            self._append_settings(f"AI refresh failed: {res.get('error', 'unknown')}")
+            return
+        profiles = res.get("profiles", []) or []
+        self._ai_profiles_cache = {p.get("name", ""): p for p in profiles if isinstance(p, dict)}
+        names = list(self._ai_profiles_cache.keys())
+        self.ai_profile_combo["values"] = names
+        active = str(res.get("active_profile", "") or "")
+        if active and active in self._ai_profiles_cache:
+            self.ai_profile_var.set(active)
+        elif names:
+            self.ai_profile_var.set(names[0])
+        else:
+            self.ai_profile_var.set("")
+        self._load_ai_profile_into_form()
+        self._append_settings(f"AI profiles loaded: {len(names)} (active: {self.ai_profile_var.get() or 'none'})")
+
+    def _load_ai_profile_into_form(self) -> None:
+        name = self.ai_profile_var.get().strip()
+        prof = getattr(self, "_ai_profiles_cache", {}).get(name, {})
+        if not prof:
+            return
+        self.ai_provider_var.set(str(prof.get("provider", "xai") or "xai"))
+        self.ai_model_var.set(str(prof.get("model", "") or ""))
+        self.ai_endpoint_var.set(str(prof.get("endpoint", "") or ""))
+        self.ai_internet_var.set(bool(prof.get("internet_access", True)))
+        self.ai_temp_var.set(str(prof.get("temperature", 0.2)))
+        key_state = "set" if bool(prof.get("api_key_set", False)) else "missing"
+        key_source = str(prof.get("api_key_source", "") or "")
+        self._append_settings(f"Profile `{name}` loaded. API key: {key_state} ({key_source})")
+
+    def _save_ai_profile_from_form(self) -> None:
+        name = self.ai_profile_var.get().strip()
+        if not name:
+            messagebox.showinfo("AI Profiles", "Enter/select a profile name first.")
+            return
+        try:
+            temp = float(self.ai_temp_var.get().strip() or "0.2")
+        except Exception:
+            temp = 0.2
+        res = self.bridge.upsert_ai_profile(
+            name=name,
+            provider=self.ai_provider_var.get().strip().lower(),
+            model=self.ai_model_var.get().strip(),
+            endpoint=self.ai_endpoint_var.get().strip(),
+            internet_access=bool(self.ai_internet_var.get()),
+            temperature=temp,
+            activate=False,
+        )
+        if not res.get("ok"):
+            self._append_settings(f"Save AI profile failed: {res.get('error', 'unknown')}")
+            return
+        self._append_settings(f"Saved AI profile: {name}")
+        self._refresh_ai_profiles()
+        self.ai_profile_var.set(name)
+        self._load_ai_profile_into_form()
+
+    def _set_active_ai_profile_from_form(self) -> None:
+        name = self.ai_profile_var.get().strip()
+        if not name:
+            return
+        res = self.bridge.set_active_ai_profile(name)
+        if not res.get("ok"):
+            self._append_settings(f"Set active failed: {res.get('error', 'unknown')}")
+            return
+        self._append_settings(f"Active AI profile set: {name}")
+        self._refresh_ai_profiles()
+
+    def _delete_ai_profile_from_form(self) -> None:
+        name = self.ai_profile_var.get().strip()
+        if not name:
+            return
+        ok = messagebox.askyesno("Delete AI Profile", f"Delete AI profile '{name}'?")
+        if not ok:
+            return
+        res = self.bridge.delete_ai_profile(name)
+        if not res.get("ok"):
+            self._append_settings(f"Delete AI profile failed: {res.get('error', 'unknown')}")
+            return
+        self._append_settings(f"Deleted AI profile: {name}")
+        self._refresh_ai_profiles()
+
+    def _set_ai_key_from_form(self) -> None:
+        name = self.ai_profile_var.get().strip()
+        key = self.ai_key_var.get().strip()
+        if not name or not key:
+            messagebox.showinfo("AI API Key", "Select profile and enter API key.")
+            return
+        res = self.bridge.set_ai_profile_key(name, key)
+        if not res.get("ok"):
+            self._append_settings(f"Set API key failed: {res.get('error', 'unknown')}")
+            return
+        self.ai_key_var.set("")
+        self._append_settings(f"Stored API key for profile: {name}")
+        self._refresh_ai_profiles()
+
+    def _remove_ai_key_from_form(self) -> None:
+        name = self.ai_profile_var.get().strip()
+        if not name:
+            return
+        res = self.bridge.remove_ai_profile_key(name)
+        if not res.get("ok"):
+            self._append_settings(f"Remove API key failed: {res.get('error', 'unknown')}")
+            return
+        self._append_settings(f"Removed stored API key for profile: {name}")
+        self._refresh_ai_profiles()
+
+    def _test_ai_profile_from_form(self) -> None:
+        name = self.ai_profile_var.get().strip()
+        if not name:
+            return
+        self._append_settings(f"Testing AI profile: {name} ...")
+        res = self.bridge.test_ai_profile(name)
+        if res.get("ok"):
+            snippet = (res.get("response", "") or "").strip()[:200]
+            self._append_settings(f"AI test OK ({name}): {snippet}")
+        else:
+            err = res.get("error", "unknown")
+            status = res.get("status", "")
+            self._append_settings(f"AI test failed ({name}) status={status}: {err}")
 
     def _show_ai_settings_hint(self) -> None:
         messagebox.showinfo(
