@@ -79,6 +79,11 @@ GUI (gui-nightly branch):
 python scripts/run_gui.py
 ```
 
+GUI task execution:
+
+- Default mode runs one active task at a time (additional tasks are queued).
+- Optional `Advanced Mode: Parallel jobs (experimental)` can be enabled in GUI Settings to allow limited concurrent jobs.
+
 GUI traditional-region UX:
 
 - Country selector now uses readable region names (not numeric-only codes).

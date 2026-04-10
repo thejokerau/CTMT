@@ -74,6 +74,7 @@ class CTMTGuiApp:
         self.auto_refresh_job: Optional[str] = None
         self.auto_refresh_running = False
         self.busy = False
+        self.running_tasks = 0
         self.task_queue = deque()
         self.ai_last_source_text = ""
         self.ai_conversation: List[Dict[str, str]] = []
@@ -87,6 +88,7 @@ class CTMTGuiApp:
 
         self._build_ui()
         self._refresh_panel_list()
+        self._update_run_controls_and_status()
 
     def _build_ui(self) -> None:
         self.nb = ttk.Notebook(self.root)
@@ -346,6 +348,15 @@ class CTMTGuiApp:
 
         self.display_currency_var = tk.StringVar(value=self.state.get("display_currency", "USD"))
         self._labeled_combo(frame, "Display Currency", self.display_currency_var, ["USD", "AUD", "EUR", "GBP", "CAD", "JPY", "NZD", "SGD", "HKD", "CHF"])
+        self.parallel_mode_var = tk.BooleanVar(value=bool(self.state.get("parallel_mode_enabled", False)))
+        self.parallel_jobs_var = tk.StringVar(value=str(self.state.get("parallel_max_jobs", 2)))
+        ttk.Checkbutton(
+            frame,
+            text="Advanced Mode: Parallel jobs (experimental)",
+            variable=self.parallel_mode_var,
+            command=lambda: self._update_run_controls_and_status(),
+        ).pack(anchor="w", pady=(8, 2))
+        self._labeled_entry(frame, "Max parallel jobs", self.parallel_jobs_var)
 
         dash_frame = ttk.LabelFrame(frame, text="User Dashboard Profiles", padding=8)
         dash_frame.pack(fill="x", pady=8)
@@ -440,22 +451,36 @@ class CTMTGuiApp:
         return p
 
     def _notify_busy(self, task_name: str) -> None:
-        messagebox.showinfo(
-            "Task Queued",
-            f"A task is already running. '{task_name}' has been queued and will start automatically.",
-        )
+        messagebox.showinfo("Task Queued", f"Task queued: {task_name}")
+
+    def _task_limit(self) -> int:
+        mode_var = getattr(self, "parallel_mode_var", None)
+        jobs_var = getattr(self, "parallel_jobs_var", None)
+        if mode_var is not None and bool(mode_var.get()):
+            try:
+                raw = str(jobs_var.get()).strip() if jobs_var is not None else "2"
+                return max(1, int(raw or "2"))
+            except Exception:
+                return 2
+        return 1
 
     def _queue_if_busy(self, task_name: str, starter) -> bool:
-        if self.busy:
+        if self.running_tasks >= self._task_limit():
             self.task_queue.append((task_name, starter))
-            self.status_var.set(f"Running with {len(self.task_queue)} queued")
+            self._update_run_controls_and_status()
             self._notify_busy(task_name)
             return True
         return False
 
     def _set_busy(self, busy: bool, task_name: str = "") -> None:
-        self.busy = busy
-        run_state = "disabled" if busy else "normal"
+        if busy:
+            self.running_tasks += 1
+        else:
+            self.running_tasks = max(0, self.running_tasks - 1)
+        self.busy = self.running_tasks > 0
+        limit = self._task_limit()
+        disable = self.running_tasks > 0 and limit <= 1
+        run_state = "disabled" if disable else "normal"
         for btn_name in [
             "btn_run_selected",
             "btn_run_all",
@@ -467,18 +492,53 @@ class CTMTGuiApp:
             btn = getattr(self, btn_name, None)
             if btn is not None:
                 btn.configure(state=run_state)
-        if busy:
-            label = f"Running: {task_name}" if task_name else "Running..."
+        if (not busy) and self.task_queue and self.running_tasks < limit:
+            slots = limit - self.running_tasks
+            for _ in range(min(slots, len(self.task_queue))):
+                next_name, next_job = self.task_queue.popleft()
+                self.status_var.set(f"Starting queued task: {next_name} ({len(self.task_queue)} remaining)")
+                self.root.after(100, next_job)
+        if self.running_tasks > 0:
+            label = f"Running {self.running_tasks}/{limit}"
+            if self.task_queue:
+                label += f" | queued {len(self.task_queue)}"
+            if task_name:
+                label += f" | {task_name}"
             self.status_var.set(label)
             self.status_progress.start(10)
         else:
             self.status_progress.stop()
+            self.status_var.set("Ready")
+
+    def _update_run_controls_and_status(self) -> None:
+        limit = self._task_limit()
+        disable = self.running_tasks > 0 and limit <= 1
+        run_state = "disabled" if disable else "normal"
+        for btn_name in [
+            "btn_run_selected",
+            "btn_run_all",
+            "btn_run_backtest",
+            "btn_run_ai",
+            "btn_run_research_std",
+            "btn_run_research_comp",
+        ]:
+            btn = getattr(self, btn_name, None)
+            if btn is not None:
+                btn.configure(state=run_state)
+        if self.running_tasks > 0:
+            label = f"Running {self.running_tasks}/{limit}"
             if self.task_queue:
-                next_name, next_job = self.task_queue.popleft()
-                self.status_var.set(f"Starting queued task: {next_name} ({len(self.task_queue)} remaining)")
-                self.root.after(100, next_job)
-            else:
-                self.status_var.set("Ready")
+                label += f" | queued {len(self.task_queue)}"
+            self.status_var.set(label)
+            self.status_progress.start(10)
+        else:
+            self.status_progress.stop()
+            self.status_var.set("Ready")
+
+    def _bridge_for_task(self) -> EngineBridge:
+        if self._task_limit() <= 1:
+            return self.bridge
+        return EngineBridge(repo_root=self.repo_root)
 
     def _browse_ai_backtest_file(self) -> None:
         initial_dir = self.repo_root / "experiments" / "backtest_snapshots"
@@ -528,9 +588,10 @@ class CTMTGuiApp:
         self.live_output.delete("1.0", tk.END)
 
         def worker():
+            bridge = self._bridge_for_task()
             chunks = []
             for p in self.live_panels:
-                res = self.bridge.run_live_panel(asdict(p))
+                res = bridge.run_live_panel(asdict(p))
                 if not res.get("ok"):
                     chunks.append(f"=== {p.name} ===\nERROR: {res.get('error', 'unknown')}\n")
                     continue
@@ -570,7 +631,8 @@ class CTMTGuiApp:
             self.live_output.delete("1.0", tk.END)
 
         def worker():
-            res = self.bridge.run_live_panel(asdict(panel))
+            bridge = self._bridge_for_task()
+            res = bridge.run_live_panel(asdict(panel))
             if not res.get("ok"):
                 out = f"ERROR: {res.get('error', 'unknown')}"
             else:
@@ -675,7 +737,8 @@ class CTMTGuiApp:
         }
 
         def worker():
-            res = self.bridge.run_backtest(cfg)
+            bridge = self._bridge_for_task()
+            res = bridge.run_backtest(cfg)
             self.root.after(0, lambda: self._finish_backtest_output(res))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -713,7 +776,8 @@ class CTMTGuiApp:
                 return
 
         def worker():
-            res = self.bridge.run_ai_analysis(text, dt, prompt_override=prompt)
+            bridge = self._bridge_for_task()
+            res = bridge.run_ai_analysis(text, dt, prompt_override=prompt)
             self.root.after(0, lambda: self._finish_ai_output(res))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -773,7 +837,8 @@ class CTMTGuiApp:
                 return
 
         def worker():
-            res = self.bridge.run_ai_analysis(
+            bridge = self._bridge_for_task()
+            res = bridge.run_ai_analysis(
                 self.ai_last_source_text,
                 dt,
                 prompt_override=prompt,
@@ -858,10 +923,12 @@ class CTMTGuiApp:
 
         def worker():
             if standard:
-                out = self.bridge.run_standard_research()
+                bridge = self._bridge_for_task()
+                out = bridge.run_standard_research()
             else:
                 scenarios = self._build_comprehensive_scenarios_from_form()
-                out = self.bridge.run_comprehensive_research(
+                bridge = self._bridge_for_task()
+                out = bridge.run_comprehensive_research(
                     scenarios=scenarios,
                     optuna_trials=max(1, int(self.rs_trials.get() or "10")),
                     optuna_jobs=max(1, int(self.rs_jobs.get() or "4")),
@@ -969,6 +1036,14 @@ class CTMTGuiApp:
     def _persist_state(self) -> None:
         self.state["display_currency"] = self.display_currency_var.get().strip() or "USD"
         self.state["auto_refresh_seconds"] = int(self.refresh_secs_var.get().strip() or "120")
+        mode_var = getattr(self, "parallel_mode_var", None)
+        jobs_var = getattr(self, "parallel_jobs_var", None)
+        self.state["parallel_mode_enabled"] = bool(mode_var.get()) if mode_var is not None else False
+        try:
+            raw_jobs = str(jobs_var.get()).strip() if jobs_var is not None else "2"
+            self.state["parallel_max_jobs"] = max(1, int(raw_jobs or "2"))
+        except Exception:
+            self.state["parallel_max_jobs"] = 2
         self.state["live_panels"] = [asdict(p) for p in self.live_panels]
         save_state(self.state)
 
