@@ -201,6 +201,17 @@
   - data source: `docs/BUG_SCORECARD_DATA.json`
   - generated report: `docs/BUG_SCORECARD.md`
   - generator script: `scripts/update_bug_scorecard.py`
+- Added GUI Binance integration with secure profile/key management:
+  - profile CRUD + active profile + connection test in Settings
+  - key/secret stored user-local outside repo (`%USERPROFILE%\\.ctmt\\binance_*.json`)
+- Added GUI `Portfolio & Ledger` tab:
+  - Binance portfolio snapshot (balances + estimated USD value)
+  - trade/activity ledger with open-position tracking
+  - duplicate-signal cooldown guard to avoid repeated same-signal entries
+  - import live dashboard signals (`BUY/HOLD/SELL`) into guarded ledger
+  - manual ledger event entry support
+- Updated AI dashboard prompt contract:
+  - AI outputs are now instructed to include a final `Recommended API Snippet` Python section aligned to recommendations
 
 ## Current Files of Interest
 - `nightly/BTC-beta.py`
@@ -214,6 +225,7 @@
 - `experiments/registry/champions.json`
 - `gui_app/main.py`
 - `gui_app/engine_bridge.py`
+- `gui_app/binance_store.py`
 - `gui_app/state.py`
 - `scripts/run_gui.py`
 - `scripts/sync_core_to_nightly.py`
@@ -265,7 +277,7 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-10T03:51:12+00:00
+- Last update UTC: 2026-04-10T04:21:29+00:00
 - Latest experiment artifact: `experiments/runs/run_20260410T031732Z.json`
 - Champion scenarios tracked: 4
 - Latest run summary:

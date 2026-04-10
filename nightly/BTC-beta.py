@@ -214,6 +214,16 @@ TASKS — perform ALL of them in order:
      - Invalidation/stop idea
      - "Do nothing" condition
 
+7. Recommended API Snippet
+   - At the very end, add a section titled exactly: "Recommended API Snippet"
+   - Provide a concise Python example that maps your recommendations into executable API-style actions.
+   - Include:
+     - A duplicate-signal guard
+     - Position sizing placeholder logic
+     - Entry and exit handling branches
+     - A minimal trade-ledger append step
+   - Keep it practical and easy to adapt.
+
 OUTPUT FORMAT — strictly follow this structure with clean headings and bullet points. Use markdown tables only when helpful. Be concise yet insightful. Always end with:
 
 "Would you like a deeper dive on any specific asset or a side-by-side comparison with the previous dashboard?"
