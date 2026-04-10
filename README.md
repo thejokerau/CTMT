@@ -150,6 +150,7 @@ GUI Portfolio & Ledger:
 
 - New `Portfolio & Ledger` tab:
   - Binance account portfolio snapshot (balances + estimated USD value)
+  - `Reconcile Fills` action to backfill missing execution rows/open positions from Binance trade history
   - Signal import from latest live dashboard output
   - Duplicate-signal activity guard (cooldown-based) to reduce repeated same-signal actions
   - Manual ledger event entry (`BUY/SELL/HOLD`)

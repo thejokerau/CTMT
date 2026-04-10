@@ -574,6 +574,14 @@ class EngineBridge:
         except Exception:
             return None
 
+    @staticmethod
+    def _split_symbol_quote(symbol: str) -> Tuple[str, str]:
+        s = str(symbol).strip().upper()
+        for q in ["USDT", "USDC", "BUSD", "FDUSD", "USDP", "TUSD", "DAI", "USD", "BTC", "ETH", "BNB"]:
+            if s.endswith(q) and len(s) > len(q):
+                return s[: -len(q)], q
+        return s, "USD"
+
     def validate_binance_order(
         self,
         symbol: str,
@@ -1098,6 +1106,195 @@ class EngineBridge:
                 "data": out.get("data", {}),
                 "normalized_quantity": qty,
                 "normalized_price": px_norm,
+            }
+
+    def reconcile_binance_fills(
+        self,
+        profile_name: Optional[str] = None,
+        symbols: Optional[List[str]] = None,
+        max_trades_per_symbol: int = 200,
+        display_currency: str = "USD",
+    ) -> Dict[str, Any]:
+        with self._lock:
+            active, profile, creds, err = self._resolve_active_binance_profile(profile_name)
+            if err:
+                return {"ok": False, "error": err}
+            endpoint = str((profile or {}).get("endpoint", self._default_binance_endpoint()) or self._default_binance_endpoint())
+            syms_in = symbols or []
+            syms: List[str] = []
+            seen_syms: set = set()
+            for s in syms_in:
+                sym = str(s).strip().upper()
+                if not sym or sym in seen_syms:
+                    continue
+                seen_syms.add(sym)
+                syms.append(sym)
+            if not syms:
+                return {"ok": False, "error": "No symbols provided for reconciliation."}
+
+            ledger = load_trade_ledger()
+            if not isinstance(ledger, dict):
+                ledger = default_trade_ledger()
+            entries = ledger.get("entries", [])
+            open_positions = ledger.get("open_positions", {})
+            activity_guard = ledger.get("activity_guard", {})
+            if not isinstance(entries, list):
+                entries = []
+            if not isinstance(open_positions, dict):
+                open_positions = {}
+            if not isinstance(activity_guard, dict):
+                activity_guard = {}
+
+            existing_trade_keys: set = set()
+            for e in entries:
+                if not isinstance(e, dict):
+                    continue
+                k = str(e.get("exchange_trade_id", "") or "").strip()
+                if k:
+                    existing_trade_keys.add(k)
+
+            fetched = 0
+            duplicates = 0
+            added = 0
+            errors: List[str] = []
+            fill_events: List[Dict[str, Any]] = []
+
+            lim = max(1, min(1000, int(max_trades_per_symbol or 200)))
+            for sym in syms:
+                out = self._signed_binance_get(
+                    endpoint,
+                    "/api/v3/myTrades",
+                    str(creds["api_key"]),
+                    str(creds["api_secret"]),
+                    params={"symbol": sym, "limit": lim},
+                )
+                if not out.get("ok"):
+                    errors.append(f"{sym}: {out.get('error', 'myTrades request failed')}")
+                    continue
+                data = out.get("data", [])
+                if not isinstance(data, list):
+                    continue
+                fetched += len(data)
+                for tr in data:
+                    if not isinstance(tr, dict):
+                        continue
+                    tid = str(tr.get("id", "") or "").strip()
+                    if not tid:
+                        continue
+                    trade_key = f"{sym}:{tid}"
+                    if trade_key in existing_trade_keys:
+                        duplicates += 1
+                        continue
+                    try:
+                        qty = float(tr.get("qty", 0.0) or 0.0)
+                        px = float(tr.get("price", 0.0) or 0.0)
+                        tms = int(tr.get("time", 0) or 0)
+                    except Exception:
+                        continue
+                    if qty <= 0 or px <= 0 or tms <= 0:
+                        continue
+                    side = "BUY" if bool(tr.get("isBuyer", False)) else "SELL"
+                    base, quote = self._split_symbol_quote(sym)
+                    fill_events.append(
+                        {
+                            "trade_key": trade_key,
+                            "order_id": int(tr.get("orderId", 0) or 0),
+                            "symbol": sym,
+                            "asset": base,
+                            "quote": quote,
+                            "side": side,
+                            "qty": qty,
+                            "price": px,
+                            "ts_ms": tms,
+                            "ts": pd.to_datetime(tms, unit="ms", utc=True).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        }
+                    )
+
+            fill_events.sort(key=lambda x: int(x.get("ts_ms", 0) or 0))
+            dcur = str(display_currency or "USD").strip().upper() or "USD"
+            usd_like = {"USD", "USDT", "USDC", "BUSD", "FDUSD", "TUSD", "USDP", "DAI"}
+
+            for ev in fill_events:
+                trade_key = str(ev.get("trade_key", "") or "").strip()
+                if not trade_key or trade_key in existing_trade_keys:
+                    continue
+                entry_id = len(entries) + 1
+                rec = {
+                    "id": entry_id,
+                    "ts": ev.get("ts", ""),
+                    "market": "crypto",
+                    "timeframe": "spot",
+                    "panel": "binance_reconcile",
+                    "asset": str(ev.get("asset", "")).upper(),
+                    "action": str(ev.get("side", "")).upper(),
+                    "price": float(ev.get("price", 0.0) or 0.0),
+                    "qty": float(ev.get("qty", 0.0) or 0.0),
+                    "score": "",
+                    "note": f"Reconciled Binance fill ({ev.get('symbol', '')})",
+                    "is_execution": True,
+                    "quote_currency": str(ev.get("quote", "USD")).upper(),
+                    "display_currency": dcur,
+                    "exchange_symbol": str(ev.get("symbol", "")).upper(),
+                    "exchange_trade_id": trade_key,
+                    "exchange_order_id": int(ev.get("order_id", 0) or 0),
+                }
+                entries.append(rec)
+                existing_trade_keys.add(trade_key)
+                added += 1
+
+                guard_key = f"crypto|spot|{rec['asset']}|{rec['action']}"
+                activity_guard[guard_key] = {"ts": rec["ts"], "id": entry_id}
+
+                pos_key = f"crypto|spot|{rec['asset']}"
+                open_pos = open_positions.get(pos_key)
+                if rec["action"] == "BUY":
+                    open_positions[pos_key] = {
+                        "entry_id": entry_id,
+                        "entry_ts": rec["ts"],
+                        "entry_price": rec["price"],
+                        "qty": rec["qty"],
+                        "quote_currency": rec["quote_currency"],
+                        "display_currency": rec["display_currency"],
+                        "asset": rec["asset"],
+                        "market": "crypto",
+                        "timeframe": "spot",
+                        "panel": "binance_reconcile",
+                    }
+                elif rec["action"] == "SELL":
+                    if isinstance(open_pos, dict):
+                        rec["closed_entry_id"] = int(open_pos.get("entry_id", 0) or 0)
+                        try:
+                            entry_price = float(open_pos.get("entry_price", 0.0) or 0.0)
+                        except Exception:
+                            entry_price = 0.0
+                        if entry_price > 0 and rec["price"] > 0:
+                            rec["pnl_pct"] = round(((rec["price"] - entry_price) / entry_price) * 100.0, 4)
+                            pnl_quote = (rec["price"] - entry_price) * max(0.0, float(rec["qty"]))
+                            rec["pnl_quote"] = round(float(pnl_quote), 8)
+                            qc = str(rec.get("quote_currency", "USD")).upper()
+                            if qc == dcur:
+                                rec["pnl_display"] = round(float(pnl_quote), 8)
+                            elif qc in usd_like:
+                                try:
+                                    fx = float(self.mod.get_usd_to_currency_rate(dcur))
+                                except Exception:
+                                    fx = 1.0
+                                rec["fx_usd_to_display"] = fx
+                                rec["pnl_display"] = round(float(pnl_quote) * fx, 8)
+                        open_positions.pop(pos_key, None)
+
+            ledger["entries"] = entries
+            ledger["open_positions"] = open_positions
+            ledger["activity_guard"] = activity_guard
+            save_trade_ledger(ledger)
+            return {
+                "ok": True,
+                "profile": active,
+                "symbols": syms,
+                "fetched_trades": fetched,
+                "duplicates_skipped": duplicates,
+                "added_entries": added,
+                "errors": errors[:20],
             }
 
     def get_trade_ledger(self) -> Dict[str, Any]:

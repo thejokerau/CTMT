@@ -446,6 +446,7 @@ class StrataGuiApp:
         ttk.Combobox(top, textvariable=self.pf_quote_var, values=["USDT", "USD", "BTC", "ETH", "BNB"], width=8, state="readonly").pack(side="left", padx=4)
         ttk.Button(top, text="Refresh Profiles", command=self._refresh_binance_profiles).pack(side="left", padx=(4, 8))
         ttk.Button(top, text="Refresh Portfolio", command=self._refresh_portfolio).pack(side="left")
+        ttk.Button(top, text="Reconcile Fills", command=self._reconcile_binance_fills).pack(side="left", padx=(6, 0))
         ttk.Label(top, text="Signal Cooldown (min)").pack(side="left", padx=(12, 0))
         ttk.Entry(top, textvariable=self.pf_cooldown_min_var, width=8).pack(side="left", padx=4)
         ttk.Checkbutton(top, text="Track HOLD signals", variable=self.pf_track_hold_var).pack(side="left", padx=(8, 0))
@@ -2686,7 +2687,7 @@ class StrataGuiApp:
             self._vlog(
                 f"Submit ok: symbol={symbol} side={side} normalized_qty={out.get('normalized_quantity')} normalized_px={out.get('normalized_price')}"
             )
-            self.bridge.record_signal_event(
+            lg = self.bridge.record_signal_event(
                 {
                     "market": "crypto",
                     "timeframe": str(rec.get("timeframe", "1d")),
@@ -2701,9 +2702,12 @@ class StrataGuiApp:
                     "is_execution": True,
                 },
                 cooldown_minutes=cooldown,
-                allow_duplicate=False,
+                # Execution events must be recorded even if a recent signal exists.
+                allow_duplicate=True,
                 guard_hold_signals=bool(self.pf_guard_hold_var.get()),
             )
+            if not lg.get("ok"):
+                self._vlog(f"Execution ledger write failed for {symbol}: {lg.get('error') or lg.get('reason') or 'unknown'}")
         self._refresh_pending_recommendations_view()
         self._refresh_ledger_view()
         self._append_task_terminal(
@@ -2741,6 +2745,73 @@ class StrataGuiApp:
                 ),
             )
         self._append_task_terminal(f"Open orders refreshed ({len(out.get('orders', []) or [])} rows).")
+
+    def _reconcile_binance_fills(self) -> None:
+        profile = self.pf_binance_profile_var.get().strip() or None
+        if not profile:
+            messagebox.showinfo("Reconcile Fills", "Select a Binance profile first.")
+            return
+
+        symbols: set[str] = set()
+        # Include pending/recent symbols first.
+        for r in self.pending_recommendations:
+            if not isinstance(r, dict):
+                continue
+            s = str(r.get("symbol", "")).strip().upper()
+            if s:
+                symbols.add(s)
+
+        # Include current holdings mapped to configured quote.
+        if not self.latest_portfolio_snapshot or not bool(self.latest_portfolio_snapshot.get("ok")):
+            fres = self.bridge.fetch_binance_portfolio(profile_name=profile)
+            if fres.get("ok"):
+                self.latest_portfolio_snapshot = fres
+        rows = self.latest_portfolio_snapshot.get("balances", []) if isinstance(self.latest_portfolio_snapshot, dict) else []
+        quote = self._primary_quote_asset() if self._is_primary_quote_locked() else (self.pf_quote_var.get().strip().upper() or "USDT")
+        stables = {"USDT", "USDC", "BUSD", "FDUSD", "TUSD", "USDP", "DAI", "USD"}
+        if isinstance(rows, list):
+            for b in rows:
+                if not isinstance(b, dict):
+                    continue
+                a = str(b.get("asset", "")).strip().upper()
+                if not a or a in stables:
+                    continue
+                try:
+                    total = float(b.get("total", 0.0) or 0.0)
+                except Exception:
+                    total = 0.0
+                if total > 0:
+                    symbols.add(f"{a}{quote}")
+
+        if not symbols:
+            messagebox.showinfo("Reconcile Fills", "No symbols found to reconcile yet.")
+            return
+
+        self._append_task_terminal(f"START Reconcile Fills ({len(symbols)} symbols)")
+        out = self.bridge.reconcile_binance_fills(
+            profile_name=profile,
+            symbols=sorted(symbols),
+            max_trades_per_symbol=200,
+            display_currency=self.display_currency_var.get().strip() or "USD",
+        )
+        if not out.get("ok"):
+            self._append_task_terminal(f"DONE Reconcile Fills (error: {out.get('error', 'unknown')})")
+            messagebox.showerror("Reconcile Fills", str(out.get("error", "Failed to reconcile fills.")))
+            return
+        self._refresh_ledger_view()
+        added = int(out.get("added_entries", 0) or 0)
+        dup = int(out.get("duplicates_skipped", 0) or 0)
+        fetched = int(out.get("fetched_trades", 0) or 0)
+        errs = out.get("errors", []) or []
+        self._append_task_terminal(
+            f"DONE Reconcile Fills -> fetched={fetched}, added={added}, duplicates={dup}, errors={len(errs)}"
+        )
+        if errs:
+            self._vlog("Reconcile errors: " + " | ".join([str(e) for e in errs[:5]]))
+        msg = f"Fetched trades: {fetched}\nAdded ledger entries: {added}\nDuplicates skipped: {dup}\nErrors: {len(errs)}"
+        if errs:
+            msg += f"\n\nFirst error:\n{errs[0]}"
+        messagebox.showinfo("Reconcile Fills", msg)
 
     def _cancel_selected_open_orders(self) -> None:
         if not hasattr(self, "open_orders_tree"):
