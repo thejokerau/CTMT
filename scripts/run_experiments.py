@@ -64,11 +64,13 @@ def scenario_assets(mod: Any, sc: Dict[str, Any]) -> Tuple[List[str], bool]:
     market = str(sc.get("market", "crypto")).strip().lower()
     if market == "crypto":
         top_n = int(sc.get("top_n", 20))
-        tickers = mod.filter_crypto_tickers_by_binance(mod.fetch_top_coins(top_n))
+        quote_currency = str(sc.get("quote_currency", "USD")).strip().upper() or "USD"
+        tickers = mod.filter_crypto_tickers_by_binance(mod.fetch_top_coins(top_n, quote_currency=quote_currency))
         return tickers, True
 
     country = str(sc.get("country", "2")).strip()
-    tickers = list(mod.TRADITIONAL_TOP.get(country, mod.TRADITIONAL_TOP["2"]))
+    top_n = int(sc.get("top_n", 20))
+    tickers = list(mod.TRADITIONAL_TOP.get(country, mod.TRADITIONAL_TOP["2"]))[:max(1, top_n)]
     return tickers, False
 
 

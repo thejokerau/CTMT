@@ -174,5 +174,524 @@
         }
       }
     }
+  },
+  "crypto_8h_12m_top20": {
+    "promoted_at_utc": "2026-04-09T13:47:23+00:00",
+    "source_run_file": "experiments/runs/run_20260409T134722Z.json",
+    "metrics": {
+      "return_pct": 75.96777731455062,
+      "max_drawdown_pct": 32.318951656399534,
+      "sharpe": 1.1007098108385756,
+      "sortino": 1.3104048377021817,
+      "turnover_per_year": 11.233224603914259,
+      "holdout_return_pct": 42.20422114315188,
+      "holdout_max_drawdown_pct": 33.140844578745835,
+      "holdout_sharpe": 1.2383891861460121
+    },
+    "selected": {
+      "name": "tuned",
+      "config": {
+        "initial_capital": 10000.0,
+        "stop_loss_pct": 8.0,
+        "take_profit_pct": 20.0,
+        "max_hold_days": 45,
+        "fee_pct": 0.1,
+        "slippage_pct": 0.05,
+        "min_hold_bars": 2,
+        "cooldown_bars": 1,
+        "same_asset_cooldown_bars": 3,
+        "max_consecutive_same_asset_entries": 3,
+        "max_drawdown_limit_pct": 35.0,
+        "max_exposure_pct": 0.4,
+        "tuned": {
+          "position_size": 0.3628328648310305,
+          "atr_multiplier": 2.138374575334889,
+          "adx_threshold": 28.424889095677678,
+          "cmf_threshold": 0.07041839409275477,
+          "obv_slope_threshold": 0.0002699155482608661,
+          "buy_threshold": 2,
+          "sell_threshold": -3
+        }
+      },
+      "result": {
+        "final": 17596.777731455062,
+        "return_pct": 75.96777731455062,
+        "trades_closed": 11,
+        "metrics": {
+          "max_drawdown_pct": 32.318951656399534,
+          "sharpe": 1.1007098108385756,
+          "sortino": 1.3104048377021817,
+          "turnover_per_year": 11.233224603914259,
+          "avg_hold_days": 30.272727272727273,
+          "total_years": 0.9792379648642482,
+          "asset_contrib": {
+            "BCH": 1623.24,
+            "TRX": 950.62,
+            "ADA": 907.25,
+            "BTC": 26.49000000000001,
+            "AVAX": -494.0
+          }
+        }
+      }
+    },
+    "tuned": {
+      "config": {
+        "initial_capital": 10000.0,
+        "stop_loss_pct": 8.0,
+        "take_profit_pct": 20.0,
+        "max_hold_days": 45,
+        "fee_pct": 0.1,
+        "slippage_pct": 0.05,
+        "min_hold_bars": 2,
+        "cooldown_bars": 1,
+        "same_asset_cooldown_bars": 3,
+        "max_consecutive_same_asset_entries": 3,
+        "max_drawdown_limit_pct": 35.0,
+        "max_exposure_pct": 0.4,
+        "tuned": {
+          "position_size": 0.3628328648310305,
+          "atr_multiplier": 2.138374575334889,
+          "adx_threshold": 28.424889095677678,
+          "cmf_threshold": 0.07041839409275477,
+          "obv_slope_threshold": 0.0002699155482608661,
+          "buy_threshold": 2,
+          "sell_threshold": -3
+        }
+      },
+      "score": 78.16919693622776,
+      "result": {
+        "final": 17596.777731455062,
+        "return_pct": 75.96777731455062,
+        "trades_closed": 11,
+        "metrics": {
+          "max_drawdown_pct": 32.318951656399534,
+          "sharpe": 1.1007098108385756,
+          "sortino": 1.3104048377021817,
+          "turnover_per_year": 11.233224603914259,
+          "avg_hold_days": 30.272727272727273,
+          "total_years": 0.9792379648642482,
+          "asset_contrib": {
+            "BCH": 1623.24,
+            "TRX": 950.62,
+            "ADA": 907.25,
+            "BTC": 26.49000000000001,
+            "AVAX": -494.0
+          }
+        }
+      },
+      "holdout": {
+        "final": 14220.422114315188,
+        "return_pct": 42.20422114315188,
+        "trades_closed": 7,
+        "metrics": {
+          "max_drawdown_pct": 33.140844578745835,
+          "sharpe": 1.2383891861460121,
+          "sortino": 1.4925151280488962,
+          "turnover_per_year": 14.177911275415896,
+          "avg_hold_days": 24.142857142857142,
+          "total_years": 0.49372575861282225,
+          "asset_contrib": {
+            "BCH": 730.22,
+            "TRX": 57.65999999999998,
+            "TON": -3.0,
+            "ADA": -357.94
+          }
+        }
+      }
+    },
+    "baseline": {
+      "config": {
+        "initial_capital": 10000.0,
+        "stop_loss_pct": 8.0,
+        "take_profit_pct": 20.0,
+        "max_hold_days": 45,
+        "fee_pct": 0.1,
+        "slippage_pct": 0.05,
+        "min_hold_bars": 2,
+        "cooldown_bars": 1,
+        "same_asset_cooldown_bars": 3,
+        "max_consecutive_same_asset_entries": 3,
+        "max_drawdown_limit_pct": 35.0,
+        "max_exposure_pct": 0.4,
+        "tuned": {
+          "position_size": 0.3,
+          "atr_multiplier": 2.2,
+          "adx_threshold": 25.0,
+          "cmf_threshold": 0.02,
+          "obv_slope_threshold": 0.0,
+          "buy_threshold": 2,
+          "sell_threshold": -2
+        }
+      },
+      "score": 63.312953704849456,
+      "result": {
+        "final": 16109.07180918992,
+        "return_pct": 61.09071809189919,
+        "trades_closed": 20,
+        "metrics": {
+          "max_drawdown_pct": 26.92044422915941,
+          "sharpe": 1.1111178064751321,
+          "sortino": 1.255946646948139,
+          "turnover_per_year": 20.405027932960895,
+          "avg_hold_days": 17.2,
+          "total_years": 0.9801505817932923,
+          "asset_contrib": {
+            "BCH": 1696.2800000000002,
+            "TRX": 599.03,
+            "BNB": 424.03999999999996,
+            "TON": 330.32,
+            "ETH": 147.97,
+            "BTC": -213.82,
+            "ADA": -231.22,
+            "LINK": -325.58
+          }
+        }
+      }
+    }
+  },
+  "crypto_8h_24m_top10": {
+    "promoted_at_utc": "2026-04-09T22:42:50+00:00",
+    "source_run_file": "experiments/runs/run_20260409T224249Z.json",
+    "metrics": {
+      "return_pct": 88.06053944962382,
+      "max_drawdown_pct": 30.469896795236618,
+      "sharpe": 0.9911067539873873,
+      "sortino": 1.1081837491004873,
+      "turnover_per_year": 18.90986473880597,
+      "holdout_return_pct": 31.372815317306046,
+      "holdout_max_drawdown_pct": 33.96539669695934,
+      "holdout_sharpe": 1.0994043899824566
+    },
+    "selected": {
+      "name": "baseline",
+      "config": {
+        "initial_capital": 10000.0,
+        "stop_loss_pct": 8.0,
+        "take_profit_pct": 20.0,
+        "max_hold_days": 45,
+        "fee_pct": 0.1,
+        "slippage_pct": 0.05,
+        "min_hold_bars": 2,
+        "cooldown_bars": 1,
+        "same_asset_cooldown_bars": 3,
+        "max_consecutive_same_asset_entries": 3,
+        "max_drawdown_limit_pct": 35.0,
+        "max_exposure_pct": 0.4,
+        "tuned": {
+          "position_size": 0.3,
+          "atr_multiplier": 2.2,
+          "adx_threshold": 25.0,
+          "cmf_threshold": 0.02,
+          "obv_slope_threshold": 0.0,
+          "buy_threshold": 2,
+          "sell_threshold": -2
+        }
+      },
+      "result": {
+        "final": 18806.053944962383,
+        "return_pct": 88.06053944962382,
+        "trades_closed": 37,
+        "metrics": {
+          "max_drawdown_pct": 30.469896795236618,
+          "sharpe": 0.9911067539873873,
+          "sortino": 1.1081837491004873,
+          "turnover_per_year": 18.90986473880597,
+          "avg_hold_days": 17.56756756756757,
+          "total_years": 1.9566506958704084,
+          "asset_contrib": {
+            "TRX": 1770.4099999999999,
+            "BNB": 1281.3200000000002,
+            "XRP": 928.3,
+            "ETH": 450.81,
+            "TON": 244.56,
+            "BTC": -67.03000000000003,
+            "SOL": -237.84
+          }
+        }
+      }
+    },
+    "tuned": {
+      "config": {
+        "initial_capital": 10000.0,
+        "stop_loss_pct": 8.0,
+        "take_profit_pct": 20.0,
+        "max_hold_days": 45,
+        "fee_pct": 0.1,
+        "slippage_pct": 0.05,
+        "min_hold_bars": 2,
+        "cooldown_bars": 1,
+        "same_asset_cooldown_bars": 3,
+        "max_consecutive_same_asset_entries": 3,
+        "max_drawdown_limit_pct": 35.0,
+        "max_exposure_pct": 0.4,
+        "tuned": {
+          "position_size": 0.38024538386079054,
+          "atr_multiplier": 2.0674480659059267,
+          "adx_threshold": 22.678137697432152,
+          "cmf_threshold": 0.008365410169573175,
+          "obv_slope_threshold": 0.0038317641758742224,
+          "buy_threshold": 3,
+          "sell_threshold": -3
+        }
+      },
+      "score": 82.11283067021446,
+      "result": {
+        "final": 18365.473375142454,
+        "return_pct": 83.65473375142454,
+        "trades_closed": 25,
+        "metrics": {
+          "max_drawdown_pct": 37.81037600843084,
+          "sharpe": 0.9855334646642377,
+          "sortino": 1.1169201649787885,
+          "turnover_per_year": 12.735355648535565,
+          "avg_hold_days": 25.48,
+          "total_years": 1.9630390143737166,
+          "asset_contrib": {
+            "TRX": 3151.4200000000005,
+            "BTC": 613.27,
+            "BNB": 102.32000000000005,
+            "SOL": -540.17
+          }
+        }
+      },
+      "holdout": {
+        "final": 13137.281531730605,
+        "return_pct": 31.372815317306046,
+        "trades_closed": 5,
+        "metrics": {
+          "max_drawdown_pct": 33.96539669695934,
+          "sharpe": 1.0994043899824566,
+          "sortino": 1.3466924655119847,
+          "turnover_per_year": 10.202513966480447,
+          "avg_hold_days": 31.2,
+          "total_years": 0.49007529089664614,
+          "asset_contrib": {
+            "BTC": 252.56,
+            "BNB": -310.38,
+            "TRX": -474.66
+          }
+        }
+      }
+    },
+    "baseline": {
+      "config": {
+        "initial_capital": 10000.0,
+        "stop_loss_pct": 8.0,
+        "take_profit_pct": 20.0,
+        "max_hold_days": 45,
+        "fee_pct": 0.1,
+        "slippage_pct": 0.05,
+        "min_hold_bars": 2,
+        "cooldown_bars": 1,
+        "same_asset_cooldown_bars": 3,
+        "max_consecutive_same_asset_entries": 3,
+        "max_drawdown_limit_pct": 35.0,
+        "max_exposure_pct": 0.4,
+        "tuned": {
+          "position_size": 0.3,
+          "atr_multiplier": 2.2,
+          "adx_threshold": 25.0,
+          "cmf_threshold": 0.02,
+          "obv_slope_threshold": 0.0,
+          "buy_threshold": 2,
+          "sell_threshold": -2
+        }
+      },
+      "score": 90.0427529575986,
+      "result": {
+        "final": 18806.053944962383,
+        "return_pct": 88.06053944962382,
+        "trades_closed": 37,
+        "metrics": {
+          "max_drawdown_pct": 30.469896795236618,
+          "sharpe": 0.9911067539873873,
+          "sortino": 1.1081837491004873,
+          "turnover_per_year": 18.90986473880597,
+          "avg_hold_days": 17.56756756756757,
+          "total_years": 1.9566506958704084,
+          "asset_contrib": {
+            "TRX": 1770.4099999999999,
+            "BNB": 1281.3200000000002,
+            "XRP": 928.3,
+            "ETH": 450.81,
+            "TON": 244.56,
+            "BTC": -67.03000000000003,
+            "SOL": -237.84
+          }
+        }
+      }
+    }
+  },
+  "crypto_1d_12m_top20": {
+    "promoted_at_utc": "2026-04-09T22:42:50+00:00",
+    "source_run_file": "experiments/runs/run_20260409T224249Z.json",
+    "metrics": {
+      "return_pct": 37.23097986050081,
+      "max_drawdown_pct": 34.50064591635687,
+      "sharpe": 0.8864505414740677,
+      "sortino": 1.0075946406935294,
+      "turnover_per_year": 10.317796610169491,
+      "holdout_return_pct": 22.994015559272874,
+      "holdout_max_drawdown_pct": 33.60118595453706,
+      "holdout_sharpe": 0.9719707534525991
+    },
+    "selected": {
+      "name": "tuned",
+      "config": {
+        "initial_capital": 10000.0,
+        "stop_loss_pct": 8.0,
+        "take_profit_pct": 20.0,
+        "max_hold_days": 45,
+        "fee_pct": 0.1,
+        "slippage_pct": 0.05,
+        "min_hold_bars": 2,
+        "cooldown_bars": 1,
+        "same_asset_cooldown_bars": 3,
+        "max_consecutive_same_asset_entries": 3,
+        "max_drawdown_limit_pct": 35.0,
+        "max_exposure_pct": 0.4,
+        "tuned": {
+          "position_size": 0.3221256328267649,
+          "atr_multiplier": 2.11806608995995,
+          "adx_threshold": 22.395431986484862,
+          "cmf_threshold": 0.019011135505558198,
+          "obv_slope_threshold": 0.00011039001255793508,
+          "buy_threshold": 2,
+          "sell_threshold": -3
+        }
+      },
+      "result": {
+        "final": 13723.097986050081,
+        "return_pct": 37.23097986050081,
+        "trades_closed": 10,
+        "metrics": {
+          "max_drawdown_pct": 34.50064591635687,
+          "sharpe": 0.8864505414740677,
+          "sortino": 1.0075946406935294,
+          "turnover_per_year": 10.317796610169491,
+          "avg_hold_days": 28.9,
+          "total_years": 0.9691991786447639,
+          "asset_contrib": {
+            "TRX": 943.55,
+            "DOGE": 678.78,
+            "BTC": 140.7,
+            "BNB": -287.96,
+            "TON": -1066.46
+          }
+        }
+      }
+    },
+    "tuned": {
+      "config": {
+        "initial_capital": 10000.0,
+        "stop_loss_pct": 8.0,
+        "take_profit_pct": 20.0,
+        "max_hold_days": 45,
+        "fee_pct": 0.1,
+        "slippage_pct": 0.05,
+        "min_hold_bars": 2,
+        "cooldown_bars": 1,
+        "same_asset_cooldown_bars": 3,
+        "max_consecutive_same_asset_entries": 3,
+        "max_drawdown_limit_pct": 35.0,
+        "max_exposure_pct": 0.4,
+        "tuned": {
+          "position_size": 0.3221256328267649,
+          "atr_multiplier": 2.11806608995995,
+          "adx_threshold": 22.395431986484862,
+          "cmf_threshold": 0.019011135505558198,
+          "obv_slope_threshold": 0.00011039001255793508,
+          "buy_threshold": 2,
+          "sell_threshold": -3
+        }
+      },
+      "score": 39.00388094344895,
+      "result": {
+        "final": 13723.097986050081,
+        "return_pct": 37.23097986050081,
+        "trades_closed": 10,
+        "metrics": {
+          "max_drawdown_pct": 34.50064591635687,
+          "sharpe": 0.8864505414740677,
+          "sortino": 1.0075946406935294,
+          "turnover_per_year": 10.317796610169491,
+          "avg_hold_days": 28.9,
+          "total_years": 0.9691991786447639,
+          "asset_contrib": {
+            "TRX": 943.55,
+            "DOGE": 678.78,
+            "BTC": 140.7,
+            "BNB": -287.96,
+            "TON": -1066.46
+          }
+        }
+      },
+      "holdout": {
+        "final": 12299.401555927287,
+        "return_pct": 22.994015559272874,
+        "trades_closed": 5,
+        "metrics": {
+          "max_drawdown_pct": 33.60118595453706,
+          "sharpe": 0.9719707534525991,
+          "sortino": 1.1018481303451828,
+          "turnover_per_year": 10.317796610169491,
+          "avg_hold_days": 26.0,
+          "total_years": 0.48459958932238195,
+          "asset_contrib": {
+            "BTC": 126.1,
+            "TRX": 43.39,
+            "BNB": -258.08,
+            "TON": -598.2
+          }
+        }
+      }
+    },
+    "baseline": {
+      "config": {
+        "initial_capital": 10000.0,
+        "stop_loss_pct": 8.0,
+        "take_profit_pct": 20.0,
+        "max_hold_days": 45,
+        "fee_pct": 0.1,
+        "slippage_pct": 0.05,
+        "min_hold_bars": 2,
+        "cooldown_bars": 1,
+        "same_asset_cooldown_bars": 3,
+        "max_consecutive_same_asset_entries": 3,
+        "max_drawdown_limit_pct": 35.0,
+        "max_exposure_pct": 0.4,
+        "tuned": {
+          "position_size": 0.3,
+          "atr_multiplier": 2.2,
+          "adx_threshold": 25.0,
+          "cmf_threshold": 0.02,
+          "obv_slope_threshold": 0.0,
+          "buy_threshold": 2,
+          "sell_threshold": -2
+        }
+      },
+      "score": 26.2579236213173,
+      "result": {
+        "final": 12693.904335494286,
+        "return_pct": 26.93904335494286,
+        "trades_closed": 13,
+        "metrics": {
+          "max_drawdown_pct": 36.93525683994848,
+          "sharpe": 0.8689756581550184,
+          "sortino": 0.9274136956212758,
+          "turnover_per_year": 13.527777777777777,
+          "avg_hold_days": 21.307692307692307,
+          "total_years": 0.9609856262833676,
+          "asset_contrib": {
+            "DOGE": 631.78,
+            "BNB": 408.49,
+            "BTC": 140.28,
+            "TRX": 39.35000000000005,
+            "ETH": -417.11,
+            "TON": -1002.38
+          }
+        }
+      }
+    }
   }
 }

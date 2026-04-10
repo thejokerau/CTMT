@@ -59,6 +59,21 @@ LATEST_BACKTEST_SNAPSHOT_PATH = BACKTEST_SNAPSHOT_DIR / "latest_backtest.txt"
 USER_PREFS_DIR = Path.home() / ".ctmt"
 AI_PREFS_PATH = USER_PREFS_DIR / "ai_preferences.json"
 AI_SECRETS_PATH = USER_PREFS_DIR / "ai_secrets.json"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+
+DISPLAY_CCY_MENU = {
+    "1": "USD",
+    "2": "AUD",
+    "3": "EUR",
+    "4": "GBP",
+    "5": "CAD",
+    "6": "JPY",
+    "7": "NZD",
+    "8": "SGD",
+    "9": "HKD",
+    "10": "CHF",
+}
 
 TIMEFRAME_MENU = {
     "1": ("1d", "1d"),
@@ -149,6 +164,7 @@ cp = None
 _BINANCE_SPOT_SYMBOLS: Optional[set] = None
 EMOJI_ENABLED = True
 COLOR_ENABLED = False
+FX_CACHE: Dict[str, Tuple[pd.Timestamp, float]] = {}
 
 GROK_ANALYSIS_INSTRUCTION = """You are Grok, built by xAI — an expert quantitative crypto analyst with real-time tool access (web search, X/Twitter semantic & keyword search, price validation, etc.).
 
@@ -1928,6 +1944,185 @@ def prompt_cpu_workers(label: str) -> int:
         return default_workers
 
 
+def choose_display_currency(current: str = "USD") -> str:
+    print("Select display currency for comparative reporting:")
+    print("1. USD  2. AUD  3. EUR  4. GBP  5. CAD  6. JPY  7. NZD  8. SGD  9. HKD  10. CHF")
+    default_key = next((k for k, v in DISPLAY_CCY_MENU.items() if v == current.upper()), "1")
+    ch = input(f"Enter 1-10 (default {default_key}): ").strip() or default_key
+    return DISPLAY_CCY_MENU.get(ch, current.upper())
+
+
+def get_usd_to_currency_rate(currency: str) -> float:
+    ccy = str(currency).upper().strip() or "USD"
+    if ccy == "USD":
+        return 1.0
+
+    now = pd.Timestamp.utcnow()
+    cached = FX_CACHE.get(ccy)
+    if cached is not None:
+        ts, val = cached
+        if (now - ts) <= pd.Timedelta(minutes=30):
+            return float(val)
+
+    # Try direct USDXXX pair first (e.g., USDAUD=X).
+    candidates = [(f"USD{ccy}=X", False), (f"{ccy}USD=X", True)]
+    for sym, invert in candidates:
+        try:
+            df = yf.download(sym, period="7d", interval="1d", auto_adjust=False, progress=False)
+            if df is None or df.empty:
+                continue
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            close = pd.to_numeric(df.get("Close"), errors="coerce").dropna()
+            if close.empty:
+                continue
+            rate = float(close.iloc[-1])
+            if rate <= 0:
+                continue
+            val = (1.0 / rate) if invert else rate
+            FX_CACHE[ccy] = (now, float(val))
+            return float(val)
+        except Exception:
+            continue
+    return 1.0
+
+
+def run_subprocess_task(cmd: List[str], title: str) -> bool:
+    print("\n" + "=" * 100)
+    print(title)
+    print("=" * 100)
+    print("Command:", " ".join(cmd))
+    try:
+        proc = subprocess.run(cmd, cwd=str(REPO_ROOT), check=False)
+        if proc.returncode == 0:
+            print(f"{title}: completed successfully.")
+            return True
+        print(f"{title}: failed with exit code {proc.returncode}.")
+        return False
+    except Exception as e:
+        print(f"{title}: failed to execute ({e}).")
+        return False
+
+
+def run_standard_auto_research_task() -> None:
+    cmd = [sys.executable, str(SCRIPTS_DIR / "auto_research_cycle.py")]
+    run_subprocess_task(cmd, "AUTO-RESEARCH (STANDARD)")
+
+
+def build_comprehensive_scenarios() -> List[Dict[str, object]]:
+    print("Comprehensive markets:")
+    print("1. Crypto only")
+    print("2. Traditional only")
+    print("3. Both")
+    market_choice = input("Enter 1-3 (default 3): ").strip() or "3"
+    include_crypto = market_choice in ("1", "3")
+    include_trad = market_choice in ("2", "3")
+
+    crypto_quote = "USD"
+    if include_crypto:
+        crypto_quote = choose_crypto_quote_currency()
+
+    trad_country = "2"
+    if include_trad:
+        print("Traditional region for comprehensive sweep:")
+        print("1. Australia  2. United States  3. United Kingdom  4. Europe  5. Canada")
+        trad_country = input("Enter 1-5 (default 2): ").strip() or "2"
+        if trad_country not in {"1", "2", "3", "4", "5"}:
+            trad_country = "2"
+
+    months_set = [1, 3, 6, 12, 18, 24]
+    tfs = ["1d", "4h", "8h", "12h"]
+    scenarios: List[Dict[str, object]] = []
+
+    if include_crypto:
+        for tf in tfs:
+            for m in months_set:
+                for n in [10, 20, 50, 100]:
+                    scenarios.append(
+                        {
+                            "id": f"crypto_{tf}_{m}m_top{n}_{crypto_quote}",
+                            "market": "crypto",
+                            "timeframe": tf,
+                            "months": m,
+                            "top_n": n,
+                            "quote_currency": crypto_quote,
+                        }
+                    )
+
+    if include_trad:
+        for tf in tfs:
+            for m in months_set:
+                for n in [10, 20, 50, 100]:
+                    scenarios.append(
+                        {
+                            "id": f"trad_c{trad_country}_{tf}_{m}m_top{n}",
+                            "market": "traditional",
+                            "country": trad_country,
+                            "timeframe": tf,
+                            "months": m,
+                            "top_n": n,
+                        }
+                    )
+    return scenarios
+
+
+def run_comprehensive_auto_research_task() -> None:
+    scenarios = build_comprehensive_scenarios()
+    if not scenarios:
+        print("No scenarios generated.")
+        return
+
+    try:
+        default_trials = 10
+        trials_in = input(f"Optuna trials per scenario (default {default_trials}): ").strip()
+        optuna_trials = int(trials_in) if trials_in else default_trials
+    except ValueError:
+        optuna_trials = 10
+    try:
+        default_jobs = max(1, min(8, (os.cpu_count() or 1)))
+        jobs_in = input(f"Optuna parallel jobs (default {default_jobs}): ").strip()
+        optuna_jobs = int(jobs_in) if jobs_in else default_jobs
+    except ValueError:
+        optuna_jobs = max(1, min(8, (os.cpu_count() or 1)))
+
+    runs_dir = REPO_ROOT / "experiments" / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    stamp = pd.Timestamp.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    scen_path = runs_dir / f"scenarios_comprehensive_{stamp}.json"
+    scen_path.write_text(json.dumps(scenarios, indent=2), encoding="utf-8")
+    print(f"Comprehensive scenarios written: {scen_path}")
+    print(f"Total scenarios: {len(scenarios)}")
+
+    ok1 = run_subprocess_task(
+        [
+            sys.executable,
+            str(SCRIPTS_DIR / "run_experiments.py"),
+            "--scenarios",
+            str(scen_path),
+            "--enable-optuna",
+            "--optuna-trials",
+            str(max(1, optuna_trials)),
+            "--optuna-jobs",
+            str(max(1, optuna_jobs)),
+        ],
+        "AUTO-RESEARCH (COMPREHENSIVE): RUN EXPERIMENTS",
+    )
+    if not ok1:
+        return
+
+    ok2 = run_subprocess_task(
+        [sys.executable, str(SCRIPTS_DIR / "promote_champion.py")],
+        "AUTO-RESEARCH (COMPREHENSIVE): PROMOTE CHAMPIONS",
+    )
+    if not ok2:
+        return
+
+    run_subprocess_task(
+        [sys.executable, str(SCRIPTS_DIR / "update_handoff.py")],
+        "AUTO-RESEARCH (COMPREHENSIVE): UPDATE HANDOFF",
+    )
+
+
 def load_champion_registry() -> Dict[str, dict]:
     if not CHAMPION_REGISTRY_PATH.exists():
         return {}
@@ -2955,6 +3150,8 @@ def main() -> None:
         f"model={active_profile.get('model', '')}, mode={'online-aware' if active_internet else 'offline-aware'}, "
         f"key={'set' if active_key else 'missing'} ({active_key_src})"
     )
+    display_currency = "USD"
+    display_fx = 1.0
 
     while True:
         print("\n" + "=" * 100)
@@ -2965,11 +3162,29 @@ def main() -> None:
         print("3. Clear Cache")
         print("4. AI Analysis Mode")
         print("5. AI Provider Settings")
-        print("6. Exit")
+        print("6. Display Currency Settings")
+        print("7. Run Auto-Research (Standard)")
+        print("8. Run Auto-Research (Comprehensive)")
+        print("9. Exit")
+        print(f"(Current display currency: {display_currency}, FX USD->{display_currency}: {display_fx:.4f})")
 
-        main_choice = input("Enter 1-6: ").strip()
-        if main_choice == "6":
+        main_choice = input("Enter 1-9: ").strip()
+        if main_choice == "9":
             break
+        if main_choice == "8":
+            run_comprehensive_auto_research_task()
+            input("\nPress Enter to return to main menu...")
+            continue
+        if main_choice == "7":
+            run_standard_auto_research_task()
+            input("\nPress Enter to return to main menu...")
+            continue
+        if main_choice == "6":
+            display_currency = choose_display_currency(display_currency)
+            display_fx = get_usd_to_currency_rate(display_currency)
+            print(f"Display currency set to {display_currency}. FX USD->{display_currency} = {display_fx:.4f}")
+            input("\nPress Enter to return to main menu...")
+            continue
         if main_choice == "5":
             run_ai_provider_settings_menu()
             input("\nPress Enter to return to main menu...")
@@ -3051,7 +3266,13 @@ def main() -> None:
             print("\n" + "=" * 170)
             print(f"LIVE DASHBOARD ({'Crypto' if is_crypto else 'Traditional'}) [{timeframe}]")
             print("=" * 170)
-            print(table.drop(columns=["_Ticker"], errors="ignore").to_string())
+            table_print = table.drop(columns=["_Ticker"], errors="ignore").copy()
+            fx = get_usd_to_currency_rate(display_currency)
+            if display_currency != "USD":
+                table_print[f"Price ({display_currency})"] = (pd.to_numeric(table_print["Price"], errors="coerce") * fx).round(4)
+                table_print[f"Fib Support ({display_currency})"] = (pd.to_numeric(table_print["Fib Support"], errors="coerce") * fx).round(4)
+                table_print[f"Fib Resistance ({display_currency})"] = (pd.to_numeric(table_print["Fib Resistance"], errors="coerce") * fx).round(4)
+            print(table_print.to_string())
 
             print("\n" + "=" * 170)
             print("RISK SCORE BREAKDOWN")
@@ -3245,6 +3466,9 @@ def main() -> None:
             top_contrib = list(contrib.items())[:5] if isinstance(contrib, dict) else []
 
             print(f"\nFinal Value   : ${result['final']:,.2f}")
+            fx = get_usd_to_currency_rate(display_currency)
+            if display_currency != "USD":
+                print(f"Final Value   : {display_currency} {(result['final'] * fx):,.2f}  (FX USD->{display_currency} {fx:.4f})")
             print(f"Total Return  : {result['return_pct']:+.2f}%")
             print(f"Trades closed : {len(trades)}")
             print(f"Win rate      : {win_rate:.2f}%")

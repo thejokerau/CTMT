@@ -114,6 +114,14 @@
 - Added Ollama recovery flow:
   - attempts `ollama serve` startup when local endpoint is unreachable
   - attempts model auto-pull on missing-model errors (configurable via `OLLAMA_AUTO_PULL`)
+- Added main-menu auto-research execution options:
+  - standard auto-research run (`scripts/auto_research_cycle.py`)
+  - comprehensive auto-research run (generated scenario matrix + run/promote/handoff chain)
+  - comprehensive mode supports selected market scope and runs all configured timeframes/lookback windows
+- Added display-currency comparative output:
+  - user-selectable display currency in main menu
+  - live dashboard shows converted price/Fib comparison columns
+  - backtest summary now includes converted final value in selected local currency
 - Expanded Traditional asset selection scale:
   - regional curated universes enlarged beyond top-10
   - top-list selection now supports `Top 10 / Top 20 / Top 50 / Top 100` (when available)
@@ -181,13 +189,13 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-09T13:21:31+00:00
-- Latest experiment artifact: `experiments/runs/run_20260408T131249Z.json`
-- Champion scenarios tracked: 1
+- Last update UTC: 2026-04-10T01:11:12+00:00
+- Latest experiment artifact: `experiments/runs/run_20260409T224249Z.json`
+- Champion scenarios tracked: 4
 - Latest run summary:
-- `crypto_1d_12m_top20`: selected `tuned`, return +43.09%, maxDD 36.11%, sharpe 0.94
-- `crypto_8h_12m_top20`: selected `tuned`, return +70.51%, maxDD 36.83%, sharpe 1.19
-- `crypto_8h_24m_top10`: selected `tuned`, return +39.92%, maxDD 36.49%, sharpe 0.87
-- `crypto_12h_24m_top10`: selected `tuned`, return +90.47%, maxDD 30.12%, sharpe 1.12
+- `crypto_1d_12m_top20`: selected `tuned`, return +37.23%, maxDD 34.50%, sharpe 0.89
+- `crypto_8h_12m_top20`: selected `tuned`, return +60.08%, maxDD 35.76%, sharpe 1.12
+- `crypto_8h_24m_top10`: selected `baseline`, return +88.06%, maxDD 30.47%, sharpe 0.99
+- `crypto_12h_24m_top10`: selected `tuned`, return +83.32%, maxDD 32.27%, sharpe 0.96
 <!-- AUTO_HANDBACK_END -->
 

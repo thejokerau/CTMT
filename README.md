@@ -58,6 +58,7 @@ python nightly/BTC-beta.py
 - Backtest lookback selector: `1/3/6/12/18/24 months`
 - Traditional market top-list selector expanded to `Top 10/20/50/100` (region-based curated universes)
 - Crypto quote currency selector: `USD / USDT / BTC / ETH / BNB`
+- Display currency selector for comparative reporting (e.g., AUD/EUR/GBP/JPY) with USD FX conversion
 - Accurate period math using `365.25` days/year
 - Dynamic Fibonacci swing detection with support/resistance guards
 - ATR/ADX/OBV/CMF risk-scoring integration
@@ -145,6 +146,11 @@ Promotion gates (`scripts/promote_champion.py`) are conservative by default:
 - maximum sharpe drop allowed vs champion: `-0.10`
 
 Detailed automation reference: `docs/AUTOMATION.md`
+
+From nightly main menu you can run:
+
+- `7. Run Auto-Research (Standard)` -> existing cycle script
+- `8. Run Auto-Research (Comprehensive)` -> generated scenario sweep across all timeframes and lookback windows for selected market scope
 
 ### Runtime Champion Suggestions
 
