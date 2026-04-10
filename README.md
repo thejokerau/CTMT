@@ -207,6 +207,17 @@ Promotion gates (`scripts/promote_champion.py`) are conservative by default:
 
 Detailed automation reference: `docs/AUTOMATION.md`
 
+Bug tracking references:
+
+- `docs/BUG_SCORECARD.md` (generated build-by-build + aggregate view)
+- `docs/BUG_SCORECARD_DATA.json` (source data)
+
+Refresh command:
+
+```bash
+python scripts/update_bug_scorecard.py
+```
+
 From nightly main menu you can run:
 
 - `7. Run Auto-Research (Standard)` -> existing cycle script

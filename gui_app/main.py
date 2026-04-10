@@ -78,6 +78,8 @@ class CTMTGuiApp:
         self.busy = False
         self.running_tasks = 0
         self.running_task_names: List[str] = []
+        self._task_id_seq = 0
+        self._running_tasks: Dict[int, str] = {}
         self.task_queue = deque()
         self.queue_paused = False
         self.ai_last_source_text = ""
@@ -614,14 +616,14 @@ class CTMTGuiApp:
 
     def _set_busy(self, busy: bool, task_name: str = "") -> None:
         if busy:
-            self.running_tasks += 1
-            self.running_task_names.append(task_name or "Task")
+            self._task_id_seq += 1
+            task_id = int(self._task_id_seq)
+            self._running_tasks[task_id] = task_name or "Task"
         else:
-            self.running_tasks = max(0, self.running_tasks - 1)
-            if task_name and task_name in self.running_task_names:
-                self.running_task_names.remove(task_name)
-            elif self.running_task_names:
-                self.running_task_names.pop(0)
+            task_id = None
+            # Backward-compatible no-op return var for non-start calls.
+        self.running_task_names = [self._running_tasks[k] for k in sorted(self._running_tasks.keys())]
+        self.running_tasks = len(self._running_tasks)
         self.busy = self.running_tasks > 0
         limit = self._task_limit()
         disable = self.running_tasks > 0 and limit <= 1
@@ -655,6 +657,21 @@ class CTMTGuiApp:
             self.status_progress.stop()
             self.status_var.set("Ready")
         self._refresh_task_tab()
+        return task_id
+
+    def _finish_task(self, task_id: Optional[int], task_name: str = "") -> None:
+        if task_id is not None and task_id in self._running_tasks:
+            del self._running_tasks[task_id]
+        elif task_name:
+            for k in sorted(self._running_tasks.keys()):
+                if self._running_tasks.get(k) == task_name:
+                    del self._running_tasks[k]
+                    break
+        elif self._running_tasks:
+            # Fallback: remove oldest active task.
+            oldest = sorted(self._running_tasks.keys())[0]
+            del self._running_tasks[oldest]
+        self._set_busy(False, task_name=task_name)
 
     def _update_run_controls_and_status(self) -> None:
         limit = self._task_limit()
@@ -893,7 +910,8 @@ class CTMTGuiApp:
         self._start_run_all_panels()
 
     def _start_run_all_panels(self) -> None:
-        self._set_busy(True, "Live Dashboard (All Panels)")
+        task_name = "Live Dashboard (All Panels)"
+        task_id = self._set_busy(True, task_name)
         self._append_task_terminal("START Live Dashboard (All Panels)")
         self.live_output.delete("1.0", tk.END)
 
@@ -926,7 +944,7 @@ class CTMTGuiApp:
                 chunks.append("\n".join(text) + "\n")
 
             out = "\n".join(chunks)
-            self.root.after(0, lambda: self._finish_live_output(out, "Live Dashboard (All Panels)"))
+            self.root.after(0, lambda: self._finish_live_output(out, task_name, task_id))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -939,8 +957,9 @@ class CTMTGuiApp:
         self._start_run_live_job(panel, selected_only)
 
     def _start_run_live_job(self, panel: LivePanelConfig, selected_only: bool = False) -> None:
-        self._set_busy(True, f"Live Dashboard ({panel.name})")
-        self._append_task_terminal(f"START Live Dashboard ({panel.name})")
+        task_name = f"Live Dashboard ({panel.name})"
+        task_id = self._set_busy(True, task_name)
+        self._append_task_terminal(f"START {task_name}")
         if selected_only:
             self.live_output.delete("1.0", tk.END)
 
@@ -969,16 +988,16 @@ class CTMTGuiApp:
                     for n in notes:
                         lines.append(f"- {n}")
                 out = "\n".join(lines)
-            self.root.after(0, lambda: self._finish_live_output(out, f"Live Dashboard ({panel.name})"))
+            self.root.after(0, lambda: self._finish_live_output(out, task_name, task_id))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_live_output(self, text: str, task_name: str = "Live Dashboard") -> None:
+    def _finish_live_output(self, text: str, task_name: str = "Live Dashboard", task_id: Optional[int] = None) -> None:
         self.live_output.delete("1.0", tk.END)
         self.live_output.insert("1.0", text)
         self._apply_color_tags(self.live_output)
         self._append_task_terminal(f"DONE {task_name}")
-        self._set_busy(False)
+        self._finish_task(task_id, task_name=task_name)
         self._persist_state()
 
     def _start_auto_refresh(self) -> None:
@@ -1009,7 +1028,8 @@ class CTMTGuiApp:
         self._start_run_backtest()
 
     def _start_run_backtest(self) -> None:
-        self._set_busy(True, "Backtest")
+        task_name = "Backtest"
+        task_id = self._set_busy(True, task_name)
         self._append_task_terminal("START Backtest")
         self.bt_summary.delete("1.0", tk.END)
         self.bt_trades.delete("1.0", tk.END)
@@ -1062,11 +1082,11 @@ class CTMTGuiApp:
             log = (res.get("log", "") or "").strip()
             if log:
                 self._append_task_terminal_from_worker(f"LOG [Backtest] {log[:6000]}")
-            self.root.after(0, lambda: self._finish_backtest_output(res))
+            self.root.after(0, lambda: self._finish_backtest_output(res, task_id))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_backtest_output(self, res: Dict[str, Any]) -> None:
+    def _finish_backtest_output(self, res: Dict[str, Any], task_id: Optional[int] = None) -> None:
         if not res.get("ok"):
             self.bt_summary.insert("1.0", f"ERROR: {res.get('error', 'unknown')}")
             self._append_task_terminal(f"DONE Backtest (error: {res.get('error', 'unknown')})")
@@ -1076,7 +1096,7 @@ class CTMTGuiApp:
             self._append_task_terminal("DONE Backtest")
         self._apply_color_tags(self.bt_summary)
         self._apply_color_tags(self.bt_trades)
-        self._set_busy(False)
+        self._finish_task(task_id, task_name="Backtest")
 
     def _run_ai_analysis(self) -> None:
         if self._queue_if_busy("AI Analysis", self._start_run_ai_analysis):
@@ -1084,14 +1104,15 @@ class CTMTGuiApp:
         self._start_run_ai_analysis()
 
     def _start_run_ai_analysis(self) -> None:
-        self._set_busy(True, "AI Analysis")
+        task_name = "AI Analysis"
+        task_id = self._set_busy(True, task_name)
         self._append_task_terminal("START AI Analysis")
         self.ai_output.delete("1.0", tk.END)
         text = self._resolve_ai_source_text()
         if not text.strip():
             self.ai_output.insert("1.0", "No source text available.")
             self._append_task_terminal("DONE AI Analysis (no source text)")
-            self._set_busy(False)
+            self._finish_task(task_id, task_name=task_name)
             return
         self.ai_last_source_text = text
         dt = self.ai_datetime.get().strip() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1100,7 +1121,7 @@ class CTMTGuiApp:
             preview = prompt[:2000]
             ok = messagebox.askyesno("Confirm AI Request", f"Send this prompt?\n\n{preview}")
             if not ok:
-                self._set_busy(False)
+                self._finish_task(task_id, task_name=task_name)
                 self.ai_output.insert("1.0", "AI request canceled by user.")
                 self._append_task_terminal("DONE AI Analysis (canceled)")
                 return
@@ -1111,11 +1132,11 @@ class CTMTGuiApp:
             log = (res.get("log", "") or "").strip()
             if log:
                 self._append_task_terminal_from_worker(f"LOG [AI] {log[:6000]}")
-            self.root.after(0, lambda: self._finish_ai_output(res))
+            self.root.after(0, lambda: self._finish_ai_output(res, task_id))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_ai_output(self, res: Dict[str, Any]) -> None:
+    def _finish_ai_output(self, res: Dict[str, Any], task_id: Optional[int] = None) -> None:
         if not res.get("ok"):
             self.ai_output.insert("1.0", "AI analysis failed or returned empty response.\n\nPrompt preview:\n\n")
             self.ai_output.insert("end", (res.get("prompt", "") or "")[:4000])
@@ -1128,7 +1149,7 @@ class CTMTGuiApp:
                 self.ai_conversation.append({"role": "user", "content": used_prompt})
             self.ai_conversation.append({"role": "assistant", "content": response})
             self._append_task_terminal("DONE AI Analysis")
-        self._set_busy(False)
+        self._finish_task(task_id, task_name="AI Analysis")
 
     def _run_ai_followup(self) -> None:
         if self._queue_if_busy("AI Follow-up", self._start_run_ai_followup):
@@ -1143,7 +1164,8 @@ class CTMTGuiApp:
         if not self.ai_last_source_text.strip() and not self.ai_conversation:
             messagebox.showinfo("Follow-up", "Run an initial AI analysis first.")
             return
-        self._set_busy(True, "AI Follow-up")
+        task_name = "AI Follow-up"
+        task_id = self._set_busy(True, task_name)
         self._append_task_terminal("START AI Follow-up")
         dt = self.ai_datetime.get().strip() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         history = self.ai_conversation[-6:]
@@ -1169,7 +1191,7 @@ class CTMTGuiApp:
             preview = prompt[:2000]
             ok = messagebox.askyesno("Confirm AI Follow-up", f"Send this follow-up prompt?\n\n{preview}")
             if not ok:
-                self._set_busy(False)
+                self._finish_task(task_id, task_name=task_name)
                 self._append_task_terminal("DONE AI Follow-up (canceled)")
                 return
 
@@ -1183,11 +1205,11 @@ class CTMTGuiApp:
             log = (res.get("log", "") or "").strip()
             if log:
                 self._append_task_terminal_from_worker(f"LOG [AI Follow-up] {log[:6000]}")
-            self.root.after(0, lambda: self._finish_ai_followup(res, follow))
+            self.root.after(0, lambda: self._finish_ai_followup(res, follow, task_id))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_ai_followup(self, res: Dict[str, Any], follow_text: str) -> None:
+    def _finish_ai_followup(self, res: Dict[str, Any], follow_text: str, task_id: Optional[int] = None) -> None:
         if not res.get("ok"):
             self.ai_output.insert("1.0", "AI follow-up failed.\n\n")
             self.ai_output.insert("end", (res.get("prompt", "") or "")[:4000])
@@ -1205,7 +1227,7 @@ class CTMTGuiApp:
             self.ai_conversation.append({"role": "assistant", "content": response})
             self.ai_followup_var.set("")
             self._append_task_terminal("DONE AI Follow-up")
-        self._set_busy(False)
+        self._finish_task(task_id, task_name="AI Follow-up")
 
     def _resolve_ai_source_text(self) -> str:
         source = self.ai_source.get().strip().lower()
@@ -1260,7 +1282,7 @@ class CTMTGuiApp:
 
     def _start_run_research_job(self, standard: bool) -> None:
         task_name = "Auto-Research (Standard)" if standard else "Auto-Research (Comprehensive)"
-        self._set_busy(True, task_name)
+        task_id = self._set_busy(True, task_name)
         self._append_task_terminal(f"START {task_name}")
         self.rs_output.delete("1.0", tk.END)
 
@@ -1282,7 +1304,7 @@ class CTMTGuiApp:
                 self._append_task_terminal_from_worker(f"LOG [{task_name}] {stdlog[:6000]}")
             if errlog:
                 self._append_task_terminal_from_worker(f"ERR [{task_name}] {errlog[:6000]}")
-            self.root.after(0, lambda: self._finish_research_output(out))
+            self.root.after(0, lambda: self._finish_research_output(out, task_name, task_id))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1325,7 +1347,7 @@ class CTMTGuiApp:
                         )
         return scenarios
 
-    def _finish_research_output(self, out: Dict[str, Any]) -> None:
+    def _finish_research_output(self, out: Dict[str, Any], task_name: str = "Auto-Research", task_id: Optional[int] = None) -> None:
         lines = [f"Command: {out.get('cmd', '')}", f"Return code: {out.get('returncode', '')}", ""]
         if out.get("stdout"):
             lines += ["STDOUT:", out["stdout"], ""]
@@ -1336,7 +1358,7 @@ class CTMTGuiApp:
             self._append_task_terminal("DONE Auto-Research")
         else:
             self._append_task_terminal("DONE Auto-Research (error)")
-        self._set_busy(False)
+        self._finish_task(task_id, task_name=task_name)
 
     def _save_dashboard_profile(self) -> None:
         name = self.dashboard_name_var.get().strip() or "default"

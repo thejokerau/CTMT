@@ -187,6 +187,15 @@
   - added terminal-style live log pane at Task Monitor bottom for start/done events and captured backend logs (useful for progress visibility/debugging)
 - Added GUI text color-highlighting for dashboard readability:
   - highlights key sections and emphasizes `BUY/HOLD/SELL` action labels in live/backtest panes
+- Fixed Task Monitor task identity bug under parallel jobs:
+  - moved task lifecycle tracking to ID-based completion mapping
+  - prevents wrong task from being removed when multiple jobs overlap
+- Added persistent bug tracker:
+  - `docs/BUG_SCORECARD.md` with user-reported issues, fix status, and open/partial items
+- Upgraded bug tracker to build-by-build + cross-build aggregate model:
+  - data source: `docs/BUG_SCORECARD_DATA.json`
+  - generated report: `docs/BUG_SCORECARD.md`
+  - generator script: `scripts/update_bug_scorecard.py`
 
 ## Current Files of Interest
 - `nightly/BTC-beta.py`
@@ -204,6 +213,9 @@
 - `scripts/run_gui.py`
 - `scripts/sync_core_to_nightly.py`
 - `docs/BRANCH_SYNC.md`
+- `docs/BUG_SCORECARD.md`
+- `docs/BUG_SCORECARD_DATA.json`
+- `scripts/update_bug_scorecard.py`
 
 ## Known Issues / Risks
 - Some CoinGecko symbols still may not be usable across all data providers; filtering now favors Binance tradability for crypto.
@@ -248,13 +260,13 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-10T03:12:41+00:00
-- Latest experiment artifact: `experiments/runs/run_20260410T025556Z.json`
+- Last update UTC: 2026-04-10T03:24:14+00:00
+- Latest experiment artifact: `experiments/runs/run_20260410T031732Z.json`
 - Champion scenarios tracked: 4
 - Latest run summary:
-- `crypto_1d_12m_top20`: selected `tuned`, return +34.93%, maxDD 31.43%, sharpe 0.82
-- `crypto_8h_12m_top20`: selected `tuned`, return +93.39%, maxDD 34.40%, sharpe 1.25
-- `crypto_8h_24m_top10`: selected `tuned`, return +76.07%, maxDD 34.19%, sharpe 0.92
-- `crypto_12h_24m_top10`: selected `baseline`, return +39.31%, maxDD 32.43%, sharpe 0.81
+- `crypto_1d_12m_top20`: selected `baseline`, return +31.06%, maxDD 36.94%, sharpe 0.91
+- `crypto_8h_12m_top20`: selected `tuned`, return +67.93%, maxDD 38.30%, sharpe 1.08
+- `crypto_8h_24m_top10`: selected `tuned`, return +107.16%, maxDD 36.56%, sharpe 1.04
+- `crypto_12h_24m_top10`: selected `tuned`, return +86.63%, maxDD 37.66%, sharpe 1.11
 <!-- AUTO_HANDBACK_END -->
 
