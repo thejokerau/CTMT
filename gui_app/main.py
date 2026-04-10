@@ -2116,9 +2116,13 @@ class StrataGuiApp:
             if not silent:
                 messagebox.showinfo("AI Recommendations", "No BUY/SELL recommendations were detected in AI output.")
             return 0
+        recs, skipped_sell = self._filter_sells_without_holdings(recs)
         self.pending_recommendations.extend(recs)
         self._refresh_pending_recommendations_view()
-        self._append_task_terminal(f"Staged {len(recs)} AI recommendation(s) into pending orders.")
+        self._append_task_terminal(
+            f"Staged {len(recs)} AI recommendation(s) into pending orders."
+            + (f" Skipped SELL (no holdings): {skipped_sell}." if skipped_sell > 0 else "")
+        )
         if bool(self.ai_log_signals_var.get()):
             try:
                 cooldown = max(1, int((self.pf_cooldown_min_var.get() or "240").strip()))
@@ -2153,8 +2157,50 @@ class StrataGuiApp:
             self._submit_selected_pending_orders()
             return len(recs)
         if not silent:
-            messagebox.showinfo("AI Recommendations", f"Staged {len(recs)} recommendation(s).")
+            msg = f"Staged {len(recs)} recommendation(s)."
+            if skipped_sell > 0:
+                msg += f"\nSkipped SELL (no holdings): {skipped_sell}"
+            messagebox.showinfo("AI Recommendations", msg)
         return len(recs)
+
+    def _filter_sells_without_holdings(self, recs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
+        profile = self.pf_binance_profile_var.get().strip() if hasattr(self, "pf_binance_profile_var") else ""
+        if not profile:
+            return recs, 0
+        # Ensure we have fresh holdings for filtering.
+        out = self.bridge.fetch_binance_portfolio(profile_name=profile)
+        if out.get("ok"):
+            self.latest_portfolio_snapshot = out
+        balances = self.latest_portfolio_snapshot.get("balances", []) if isinstance(self.latest_portfolio_snapshot, dict) else []
+        if not isinstance(balances, list) or not balances:
+            return recs, 0
+        free_by_asset: Dict[str, float] = {}
+        for b in balances:
+            if not isinstance(b, dict):
+                continue
+            a = str(b.get("asset", "")).strip().upper()
+            if not a:
+                continue
+            try:
+                free_by_asset[a] = float(b.get("free", 0.0) or 0.0)
+            except Exception:
+                free_by_asset[a] = 0.0
+        kept: List[Dict[str, Any]] = []
+        skipped = 0
+        for r in recs:
+            side = str(r.get("side", "")).strip().upper()
+            if side != "SELL":
+                kept.append(r)
+                continue
+            sym = str(r.get("symbol", "")).strip().upper()
+            base = self._base_asset_from_symbol(sym)
+            held = float(free_by_asset.get(base, 0.0) or 0.0)
+            if held <= 0:
+                skipped += 1
+                self._vlog(f"Skipped SELL recommendation (no holdings): {sym}")
+                continue
+            kept.append(r)
+        return kept, skipped
 
     def _clear_pending_recommendations(self) -> None:
         self.pending_recommendations = []
