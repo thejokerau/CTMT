@@ -220,8 +220,8 @@ class CTMTGuiApp:
         ttk.Button(presets, text="Delete Selected Profiles", command=self._delete_selected_profiles).pack(fill="x", pady=2)
         self._refresh_saved_profile_list()
 
-        self.live_output = tk.Text(right, wrap="none")
-        self.live_output.pack(fill="both", expand=True)
+        live_frame, self.live_output = self._create_scrolled_text(right, wrap="none")
+        live_frame.pack(fill="both", expand=True)
         self._configure_dashboard_tags(self.live_output)
 
     def _build_backtest_tab(self) -> None:
@@ -297,11 +297,11 @@ class CTMTGuiApp:
         self.btn_run_backtest = ttk.Button(top, text="Run Backtest", command=self._run_backtest)
         self.btn_run_backtest.pack(side="left", padx=8)
 
-        self.bt_summary = tk.Text(out, height=10, wrap="word")
-        self.bt_summary.pack(fill="x")
+        bt_summary_frame, self.bt_summary = self._create_scrolled_text(out, height=10, wrap="none")
+        bt_summary_frame.pack(fill="x")
         self._configure_dashboard_tags(self.bt_summary)
-        self.bt_trades = tk.Text(out, wrap="none")
-        self.bt_trades.pack(fill="both", expand=True, pady=(8, 0))
+        bt_trades_frame, self.bt_trades = self._create_scrolled_text(out, wrap="none")
+        bt_trades_frame.pack(fill="both", expand=True, pady=(8, 0))
         self._configure_dashboard_tags(self.bt_trades)
 
     def _build_ai_tab(self) -> None:
@@ -352,24 +352,24 @@ class CTMTGuiApp:
         ttk.Button(top, text="Start Pipeline Scheduler", command=self._start_pipeline_scheduler).pack(side="left", padx=4)
         ttk.Button(top, text="Stop Scheduler", command=self._stop_pipeline_scheduler).pack(side="left", padx=4)
 
-        self.ai_input = tk.Text(body, height=10, wrap="word")
-        self.ai_input.pack(fill="x")
+        ai_input_frame, self.ai_input = self._create_scrolled_text(body, height=10, wrap="none")
+        ai_input_frame.pack(fill="x")
         ai_file_row = ttk.Frame(body)
         ai_file_row.pack(fill="x", pady=(6, 0))
         ttk.Label(ai_file_row, text="Backtest file").pack(side="left")
         ttk.Entry(ai_file_row, textvariable=self.ai_backtest_path, width=90).pack(side="left", padx=6, fill="x", expand=True)
         ttk.Button(ai_file_row, text="Browse...", command=self._browse_ai_backtest_file).pack(side="left")
         ttk.Label(body, text="Custom prompt (used when Prompt=custom_prompt)").pack(anchor="w", pady=(8, 0))
-        self.ai_custom_prompt = tk.Text(body, height=8, wrap="word")
-        self.ai_custom_prompt.pack(fill="x")
+        ai_custom_frame, self.ai_custom_prompt = self._create_scrolled_text(body, height=8, wrap="none")
+        ai_custom_frame.pack(fill="x")
         follow_row = ttk.Frame(body)
         follow_row.pack(fill="x", pady=(8, 0))
         self.ai_followup_var = tk.StringVar(value="")
         ttk.Label(follow_row, text="Follow-up").pack(side="left")
         ttk.Entry(follow_row, textvariable=self.ai_followup_var, width=100).pack(side="left", padx=6, fill="x", expand=True)
         ttk.Button(follow_row, text="Send Follow-up", command=self._run_ai_followup).pack(side="left")
-        self.ai_output = tk.Text(body, wrap="word")
-        self.ai_output.pack(fill="both", expand=True, pady=(8, 0))
+        ai_output_frame, self.ai_output = self._create_scrolled_text(body, wrap="none")
+        ai_output_frame.pack(fill="both", expand=True, pady=(8, 0))
 
     def _build_portfolio_tab(self) -> None:
         top = ttk.Frame(self.portfolio_tab, padding=8)
@@ -408,7 +408,7 @@ class CTMTGuiApp:
 
         pending_frame = ttk.LabelFrame(self.portfolio_tab, text="Pending Recommendations (Review & Approve)", padding=8)
         pending_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self.pending_tree = ttk.Treeview(
+        pending_tree_frame, self.pending_tree = self._create_scrolled_tree(
             pending_frame,
             columns=("id", "symbol", "side", "type", "qty", "tf", "conf", "status", "reason"),
             show="headings",
@@ -428,7 +428,7 @@ class CTMTGuiApp:
         ]:
             self.pending_tree.heading(c, text=c.upper())
             self.pending_tree.column(c, width=w, anchor="w")
-        self.pending_tree.pack(fill="x", expand=False)
+        pending_tree_frame.pack(fill="x", expand=False)
         pending_btns = ttk.Frame(pending_frame)
         pending_btns.pack(fill="x", pady=(6, 0))
         ttk.Label(pending_btns, text="Set qty").pack(side="left")
@@ -459,7 +459,7 @@ class CTMTGuiApp:
         ttk.Entry(order_top, textvariable=self.pf_open_symbol_filter_var, width=14).pack(side="left", padx=4)
         ttk.Button(order_top, text="Refresh Open Orders", command=self._refresh_open_orders).pack(side="left")
         ttk.Button(order_top, text="Cancel Selected", command=self._cancel_selected_open_orders).pack(side="left", padx=6)
-        self.open_orders_tree = ttk.Treeview(
+        open_orders_frame, self.open_orders_tree = self._create_scrolled_tree(
             orders,
             columns=("symbol", "orderId", "side", "type", "status", "price", "origQty", "executedQty"),
             show="headings",
@@ -478,7 +478,7 @@ class CTMTGuiApp:
         ]:
             self.open_orders_tree.heading(c, text=c)
             self.open_orders_tree.column(c, width=w, anchor="w")
-        self.open_orders_tree.pack(fill="x", expand=False, pady=(6, 0))
+        open_orders_frame.pack(fill="x", expand=False, pady=(6, 0))
 
         cols = ttk.Frame(body)
         cols.pack(fill="both", expand=True)
@@ -487,18 +487,18 @@ class CTMTGuiApp:
         left.pack(side="left", fill="both", expand=True, padx=(0, 6))
         right.pack(side="left", fill="both", expand=True)
 
-        self.pf_portfolio_text = tk.Text(left, wrap="none")
-        self.pf_portfolio_text.pack(fill="both", expand=True)
+        pf_portfolio_frame, self.pf_portfolio_text = self._create_scrolled_text(left, wrap="none")
+        pf_portfolio_frame.pack(fill="both", expand=True)
         self._configure_dashboard_tags(self.pf_portfolio_text)
 
-        self.pf_open_positions_text = tk.Text(right, wrap="none")
-        self.pf_open_positions_text.pack(fill="both", expand=True)
+        pf_open_frame, self.pf_open_positions_text = self._create_scrolled_text(right, wrap="none")
+        pf_open_frame.pack(fill="both", expand=True)
         self._configure_dashboard_tags(self.pf_open_positions_text)
 
         bottom = ttk.LabelFrame(body, text="Trade Ledger (History + Activity Guard)", padding=6)
         bottom.pack(fill="both", expand=True, pady=(8, 0))
-        self.pf_ledger_text = tk.Text(bottom, wrap="none")
-        self.pf_ledger_text.pack(fill="both", expand=True)
+        pf_ledger_frame, self.pf_ledger_text = self._create_scrolled_text(bottom, wrap="none")
+        pf_ledger_frame.pack(fill="both", expand=True)
         self._configure_dashboard_tags(self.pf_ledger_text)
 
         self._refresh_binance_profiles()
@@ -533,8 +533,8 @@ class CTMTGuiApp:
         self.btn_run_research_comp = ttk.Button(top, text="Run Comprehensive", command=self._run_comprehensive_research)
         self.btn_run_research_comp.pack(side="left")
 
-        self.rs_output = tk.Text(self.research_tab, wrap="word")
-        self.rs_output.pack(fill="both", expand=True, padx=8, pady=8)
+        rs_frame, self.rs_output = self._create_scrolled_text(self.research_tab, wrap="none")
+        rs_frame.pack(fill="both", expand=True, padx=8, pady=8)
 
     def _build_task_tab(self) -> None:
         top = ttk.Frame(self.task_tab, padding=8)
@@ -561,9 +561,9 @@ class CTMTGuiApp:
         self.queued_list = tk.Listbox(right, height=12)
         self.queued_list.pack(fill="both", expand=True)
 
-        self.task_tab_output = tk.Text(body, height=4, wrap="word")
-        self.task_tab_output.pack(fill="x", pady=(8, 0))
-        self.task_terminal = tk.Text(
+        task_out_frame, self.task_tab_output = self._create_scrolled_text(body, height=4, wrap="none")
+        task_out_frame.pack(fill="x", pady=(8, 0))
+        task_term_frame, self.task_terminal = self._create_scrolled_text(
             body,
             height=12,
             wrap="none",
@@ -571,7 +571,7 @@ class CTMTGuiApp:
             fg="#9CF5C6",
             insertbackground="#9CF5C6",
         )
-        self.task_terminal.pack(fill="both", expand=True, pady=(6, 0))
+        task_term_frame.pack(fill="both", expand=True, pady=(6, 0))
         self.task_terminal.insert("1.0", "CTMT Task Terminal\n")
         self._refresh_task_tab()
         self._schedule_task_tab_refresh()
@@ -657,8 +657,8 @@ class CTMTGuiApp:
 
         ttk.Button(frame, text="Save Settings", command=self._persist_state).pack(fill="x")
 
-        self.settings_output = tk.Text(frame, height=8, wrap="word")
-        self.settings_output.pack(fill="both", expand=True, pady=(8, 0))
+        settings_frame, self.settings_output = self._create_scrolled_text(frame, height=8, wrap="none")
+        settings_frame.pack(fill="both", expand=True, pady=(8, 0))
         self._append_settings("Settings are stored under %USERPROFILE%\\.ctmt\\gui\\gui_state.json")
         self.ai_profile_combo.bind("<<ComboboxSelected>>", lambda _e: self._load_ai_profile_into_form())
         self.bn_profile_combo.bind("<<ComboboxSelected>>", lambda _e: self._load_binance_profile_into_form())
@@ -670,6 +670,32 @@ class CTMTGuiApp:
         row.pack(fill="x", pady=2)
         ttk.Label(row, text=label, width=16).pack(side="left")
         ttk.Entry(row, textvariable=var, width=18).pack(side="left")
+
+    def _create_scrolled_text(self, parent, **text_kwargs):
+        frame = ttk.Frame(parent)
+        text = tk.Text(frame, **text_kwargs)
+        ybar = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
+        xbar = ttk.Scrollbar(frame, orient="horizontal", command=text.xview)
+        text.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        text.grid(row=0, column=0, sticky="nsew")
+        ybar.grid(row=0, column=1, sticky="ns")
+        xbar.grid(row=1, column=0, sticky="ew")
+        return frame, text
+
+    def _create_scrolled_tree(self, parent, **tree_kwargs):
+        frame = ttk.Frame(parent)
+        tree = ttk.Treeview(frame, **tree_kwargs)
+        ybar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        xbar = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        tree.grid(row=0, column=0, sticky="nsew")
+        ybar.grid(row=0, column=1, sticky="ns")
+        xbar.grid(row=1, column=0, sticky="ew")
+        return frame, tree
 
     def _configure_dashboard_tags(self, widget: tk.Text) -> None:
         # Section/header emphasis
@@ -1037,8 +1063,8 @@ class CTMTGuiApp:
         win.title("Task Monitor")
         win.geometry("640x360")
         self.task_monitor_window = win
-        text = tk.Text(win, wrap="word")
-        text.pack(fill="both", expand=True, padx=8, pady=8)
+        text_frame, text = self._create_scrolled_text(win, wrap="none")
+        text_frame.pack(fill="both", expand=True, padx=8, pady=8)
         self.task_monitor_text = text
 
         btn_row = ttk.Frame(win)
