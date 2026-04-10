@@ -620,14 +620,27 @@ class EngineBridge:
         min_notional_f = f_map.get("MIN_NOTIONAL", {})
         notional_f = f_map.get("NOTIONAL", {})
 
-        lot_filter = market_lot if t == "MARKET" and market_lot else lot
-        min_qty = self._to_decimal(lot_filter.get("minQty", "0"))
-        max_qty = self._to_decimal(lot_filter.get("maxQty", "0"))
-        step_qty = self._to_decimal(lot_filter.get("stepSize", "0"))
+        # Binance still enforces LOT_SIZE for quantity stepping; MARKET_LOT_SIZE may add tighter bounds.
+        lot_min = self._to_decimal(lot.get("minQty", "0"))
+        lot_max = self._to_decimal(lot.get("maxQty", "0"))
+        lot_step = self._to_decimal(lot.get("stepSize", "0"))
+        mkt_min = self._to_decimal(market_lot.get("minQty", "0")) if isinstance(market_lot, dict) and market_lot else Decimal("0")
+        mkt_max = self._to_decimal(market_lot.get("maxQty", "0")) if isinstance(market_lot, dict) and market_lot else Decimal("0")
+        mkt_step = self._to_decimal(market_lot.get("stepSize", "0")) if isinstance(market_lot, dict) and market_lot else Decimal("0")
 
+        step_qty = lot_step if lot_step > Decimal("0") else mkt_step
         norm_qty = self._round_to_step(qty, step_qty) if step_qty > Decimal("0") else qty
         if norm_qty <= Decimal("0"):
             return {"ok": False, "error": f"Quantity too small after step-size normalization (step {step_qty})."}
+
+        min_qty = lot_min
+        max_qty = lot_max
+        if t == "MARKET":
+            if mkt_min > Decimal("0"):
+                min_qty = max(min_qty, mkt_min) if min_qty > Decimal("0") else mkt_min
+            if mkt_max > Decimal("0"):
+                max_qty = min(max_qty, mkt_max) if max_qty > Decimal("0") else mkt_max
+
         if min_qty > Decimal("0") and norm_qty < min_qty:
             return {"ok": False, "error": f"Quantity {norm_qty} below minQty {min_qty}."}
         if max_qty > Decimal("0") and norm_qty > max_qty:

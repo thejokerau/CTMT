@@ -2557,6 +2557,37 @@ class StrataGuiApp:
                 self._vlog(f"Submit blocked: {symbol} {side} qty={qty}")
                 blocked += 1
                 continue
+            # Pre-submit balance sanity check to reduce exchange rejects.
+            base = self._base_asset_from_symbol(symbol)
+            quote = self._quote_asset_from_symbol(symbol)
+            if side == "SELL":
+                free_base = float(free_by_asset.get(base, 0.0) or 0.0)
+                if free_base > 0 and qty > free_base:
+                    rec["status"] = "BLOCKED"
+                    rec["reason"] = f"Insufficient {base} free balance ({free_base:.8f}) for qty {qty:.8f}."
+                    self._vlog(f"Submit blocked pre-check: {symbol} SELL qty={qty} free_{base}={free_base}")
+                    blocked += 1
+                    continue
+            elif side == "BUY":
+                free_quote = float(free_by_asset.get(quote, 0.0) or 0.0)
+                p = self.bridge.get_binance_last_price(symbol=symbol, profile_name=profile)
+                try:
+                    px = float(p.get("price", 0.0) or 0.0) if p.get("ok") else 0.0
+                except Exception:
+                    px = 0.0
+                if free_quote > 0 and px > 0:
+                    est_cost = qty * px * 1.003  # small fee/slippage safety
+                    if est_cost > free_quote:
+                        rec["status"] = "BLOCKED"
+                        rec["reason"] = (
+                            f"Insufficient {quote} free balance ({free_quote:.6f}) for est cost {est_cost:.6f}. "
+                            f"Use Auto-size or lower qty."
+                        )
+                        self._vlog(
+                            f"Submit blocked pre-check: {symbol} BUY qty={qty} px={px} est_cost={est_cost} free_{quote}={free_quote}"
+                        )
+                        blocked += 1
+                        continue
             self._vlog(f"Submitting order: symbol={symbol} side={side} type={order_type} qty={qty}")
             out = self.bridge.submit_binance_order(
                 symbol=symbol,
