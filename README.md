@@ -1,16 +1,18 @@
-## Release & Branch Strategy (Best Practice)
+﻿## Release & Branch Strategy (Best Practice)
 
 Use separate long-lived branches for release channels:
 
-- **`main`** → stable production-ready channel
-- **`nightly`** → fast-moving integration channel for newest changes
+- **`main`** -> stable production-ready channel
+- **`nightly`** -> fast-moving integration channel for newest changes
+- **`gui-nightly`** -> fast-moving GUI integration channel
+- **`gui-stable`** -> GUI-stable promotion channel
 
 Recommended workflow:
 
 1. Develop features on short-lived feature branches.
-2. Merge feature branches into `nightly` first.
-3. Promote tested changes from `nightly` into `main` on cadence.
-
+2. Merge feature branches into `nightly` first for CLI/core work.
+3. Merge GUI-focused work into `gui-nightly`, then promote to `gui-stable`.
+4. Promote tested non-GUI changes from `nightly` into `main` on cadence.
 ## Script Layout
 
 To mirror the channels in the repo structure:
@@ -230,3 +232,4 @@ Ollama behavior:
 - Nightly will try to call local Ollama directly.
 - If unreachable, it attempts to start `ollama serve` automatically.
 - If model is missing, it attempts auto-pull (`OLLAMA_AUTO_PULL=1` by default).
+

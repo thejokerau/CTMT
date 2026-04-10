@@ -4,7 +4,7 @@
 - 2026-04-08
 
 ## Branch
-- `main`
+- `gui-nightly`
 
 ## Objective
 - Evolve `nightly/BTC-beta.py` into a robust multi-timeframe quant workflow with safer Fibonacci logic, faster backtesting, and tunable optimization.
@@ -122,6 +122,10 @@
   - user-selectable display currency in main menu
   - live dashboard shows converted price/Fib comparison columns
   - backtest summary now includes converted final value in selected local currency
+- Established dedicated GUI branch channels:
+  - created `gui-nightly` for active GUI development
+  - created `gui-stable` for GUI promotion/stabilization
+  - switched working branch to `gui-nightly`
 - Expanded Traditional asset selection scale:
   - regional curated universes enlarged beyond top-10
   - top-list selection now supports `Top 10 / Top 20 / Top 50 / Top 100` (when available)
@@ -189,7 +193,7 @@
 
 <!-- AUTO_HANDBACK_START -->
 ## Automated Research Status
-- Last update UTC: 2026-04-10T01:11:12+00:00
+- Last update UTC: 2026-04-10T01:23:43+00:00
 - Latest experiment artifact: `experiments/runs/run_20260409T224249Z.json`
 - Champion scenarios tracked: 4
 - Latest run summary:
