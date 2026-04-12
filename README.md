@@ -201,6 +201,7 @@ GUI Portfolio & Ledger:
     - includes targeted backtest context for each open symbol/timeframe
     - requests AI protection plan (`SET_STOP` / `SET_TRAILING` / `SET_TAKE_PROFIT` / `SET_BOTH` / `HOLD`)
     - stages protective `STOP_LOSS_LIMIT` and `TAKE_PROFIT_LIMIT` sell orders for review/submit
+    - auto-upgrades stop-only existing protection to OCO recommendations (SL+TP) when the AI plan returns stop-only for that symbol
     - trailing recommendations currently map to fixed-stop execution for compatibility (annotated in reason)
   - Protection monitor controls:
     - configurable interval (`Protect every (min)`)
@@ -214,9 +215,21 @@ GUI Portfolio & Ledger:
   - Duplicate-signal activity guard (cooldown-based) to reduce repeated same-signal actions
   - Manual ledger event entry (`BUY/SELL/HOLD`)
   - Current open-position tracking + historical ledger view
+
+GUI Position Graph:
+
+- New end-tab `Position Graph` provides a visual view of open positions.
+- Per position, the graph shows:
+  - entry marker
+  - current price marker
+  - active stop-loss marker (from open SELL stop orders)
+  - active take-profit marker (from open SELL TP/limit maker orders)
+  - PnL %
+- Includes profile selector + manual refresh and optional auto-refresh while tab is active.
   - AI recommendation staging queue with selective approval/submit flow
   - Pending queue can now size selected rows by quote notional target (for example USDT amount) instead of raw qty
   - Pending table shows estimated quote notional and symbol min-notional for faster filter debugging
+  - submit flow now retries OCO with auto-bumped qty when Binance min-notional fails (if available balance allows)
   - auto-sizing for selected pending trades:
     - BUY uses configurable `%` of available quote balance (for example USDT)
     - SELL uses configurable `%` of available base-asset balance
