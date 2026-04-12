@@ -107,6 +107,8 @@ class StrataGuiApp:
         self._pending_rec_seq = 0
         self.pipeline_job: Optional[str] = None
         self.protection_monitor_job: Optional[str] = None
+        self.portfolio_auto_refresh_job: Optional[str] = None
+        self.portfolio_auto_refresh_running = False
         self.agent_last_staged_ids: List[int] = []
         self.agent_context: Dict[str, Any] = dict(self.state.get("agent_context", {})) if isinstance(self.state.get("agent_context", {}), dict) else {}
         self.agent_context.setdefault("timeframe", "4h")
@@ -148,6 +150,7 @@ class StrataGuiApp:
         self._build_task_tab()
         self._build_settings_tab()
         self._build_status_bar()
+        self.nb.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
     def _create_scrollable_tab(self, title: str, key: str) -> ttk.Frame:
         container = ttk.Frame(self.nb)
@@ -494,6 +497,8 @@ class StrataGuiApp:
         self.pf_auto_confidence_var = tk.BooleanVar(value=True)
         self.pf_protect_interval_min_var = tk.StringVar(value="30")
         self.pf_protect_auto_send_var = tk.BooleanVar(value=False)
+        self.pf_auto_refresh_var = tk.BooleanVar(value=bool(self.state.get("portfolio_auto_refresh_enabled", True)))
+        self.pf_auto_refresh_secs_var = tk.StringVar(value=str(self.state.get("portfolio_auto_refresh_seconds", 45)))
 
         ttk.Label(top, text="Binance Profile").pack(side="left")
         self.pf_binance_profile_combo = ttk.Combobox(top, textvariable=self.pf_binance_profile_var, values=[], width=22, state="readonly")
@@ -519,6 +524,10 @@ class StrataGuiApp:
         ttk.Button(top, text="Import Signals from Live", command=self._import_signals_from_live).pack(side="left", padx=8)
         ttk.Button(top, text="Refresh Ledger", command=self._refresh_ledger_view).pack(side="left")
         ttk.Button(top, text="Prune Signal History", command=self._prune_signal_history).pack(side="left", padx=(6, 0))
+        ttk.Label(top, text="Auto refresh (s)").pack(side="left", padx=(12, 0))
+        ttk.Entry(top, textvariable=self.pf_auto_refresh_secs_var, width=6).pack(side="left", padx=4)
+        ttk.Checkbutton(top, text="While on this tab", variable=self.pf_auto_refresh_var).pack(side="left", padx=(4, 0))
+        ttk.Button(top, text="Refresh All Now", command=self._refresh_portfolio_suite).pack(side="left", padx=(6, 0))
 
         pending_frame = ttk.LabelFrame(body, text="Pending Recommendations (Review & Approve)", padding=8)
         pending_frame.pack(fill="x", expand=False, padx=8, pady=(0, 8))
@@ -643,6 +652,7 @@ class StrataGuiApp:
         self._refresh_binance_profiles()
         self._refresh_ledger_view()
         self._refresh_pending_recommendations_view()
+        self.root.after(300, self._refresh_portfolio_suite)
 
     def _build_research_tab(self) -> None:
         split = self._create_paned(self.research_tab, orient="vertical")
@@ -4503,6 +4513,65 @@ class StrataGuiApp:
             self.protection_monitor_job = None
             self._append_task_terminal("Stopped protection monitor.")
 
+    def _is_portfolio_tab_selected(self) -> bool:
+        try:
+            cur = self.nb.select()
+            return bool(cur) and (self.nb.tab(cur, "text") == "Portfolio & Ledger")
+        except Exception:
+            return False
+
+    def _refresh_portfolio_suite(self) -> None:
+        # Keep local views fresh instantly.
+        self._refresh_ledger_view()
+        # Network-backed views.
+        self._refresh_portfolio()
+        try:
+            self.root.after(120, self._refresh_open_orders)
+        except Exception:
+            pass
+
+    def _start_portfolio_auto_refresh(self) -> None:
+        self._stop_portfolio_auto_refresh()
+        if not hasattr(self, "pf_auto_refresh_var") or not bool(self.pf_auto_refresh_var.get()):
+            return
+        self.portfolio_auto_refresh_running = True
+        self._schedule_portfolio_auto_refresh_tick(initial=True)
+
+    def _stop_portfolio_auto_refresh(self) -> None:
+        self.portfolio_auto_refresh_running = False
+        if self.portfolio_auto_refresh_job:
+            try:
+                self.root.after_cancel(self.portfolio_auto_refresh_job)
+            except Exception:
+                pass
+            self.portfolio_auto_refresh_job = None
+
+    def _schedule_portfolio_auto_refresh_tick(self, initial: bool = False) -> None:
+        if not self.portfolio_auto_refresh_running:
+            return
+        if not self._is_portfolio_tab_selected():
+            self._stop_portfolio_auto_refresh()
+            return
+        try:
+            secs = max(10, int((self.pf_auto_refresh_secs_var.get() or "45").strip()))
+        except Exception:
+            secs = 45
+        if initial:
+            self._append_task_terminal(f"Portfolio auto-refresh started ({secs}s).")
+        self._refresh_portfolio_suite()
+        self.portfolio_auto_refresh_job = self.root.after(
+            secs * 1000,
+            lambda: self._schedule_portfolio_auto_refresh_tick(initial=False),
+        )
+
+    def _on_notebook_tab_changed(self, _event=None) -> None:
+        if self._is_portfolio_tab_selected():
+            self._refresh_portfolio_suite()
+            if hasattr(self, "pf_auto_refresh_var") and bool(self.pf_auto_refresh_var.get()):
+                self._start_portfolio_auto_refresh()
+        else:
+            self._stop_portfolio_auto_refresh()
+
     def _review_open_positions_mtf(self) -> None:
         profile = self.pf_binance_profile_var.get().strip() or None
         if not profile:
@@ -5476,6 +5545,15 @@ class StrataGuiApp:
                 )
             except Exception:
                 self.state["agent_guard_max_exposure_pct"] = 40.0
+        if hasattr(self, "pf_auto_refresh_var"):
+            self.state["portfolio_auto_refresh_enabled"] = bool(self.pf_auto_refresh_var.get())
+        if hasattr(self, "pf_auto_refresh_secs_var"):
+            try:
+                self.state["portfolio_auto_refresh_seconds"] = max(
+                    10, int((self.pf_auto_refresh_secs_var.get() or "45").strip())
+                )
+            except Exception:
+                self.state["portfolio_auto_refresh_seconds"] = 45
         self.state["auto_refresh_seconds"] = int(self.refresh_secs_var.get().strip() or "120")
         mode_var = getattr(self, "parallel_mode_var", None)
         jobs_var = getattr(self, "parallel_jobs_var", None)
@@ -5497,6 +5575,7 @@ def run_gui() -> None:
     def _shutdown():
         app._stop_pipeline_scheduler()
         app._stop_protection_monitor()
+        app._stop_portfolio_auto_refresh()
         app._close_task_monitor()
         if app.task_tab_job:
             try:
