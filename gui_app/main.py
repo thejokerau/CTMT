@@ -499,6 +499,7 @@ class StrataGuiApp:
         ttk.Button(top, text="Refresh Portfolio", command=self._refresh_portfolio).pack(side="left")
         ttk.Button(top, text="Reconcile Fills", command=self._reconcile_binance_fills).pack(side="left", padx=(6, 0))
         ttk.Button(top, text="Review Open Positions (MTF)", command=self._review_open_positions_mtf).pack(side="left", padx=(6, 0))
+        ttk.Button(top, text="Protect Open Positions (AI+BT)", command=self._protect_open_positions_ai).pack(side="left", padx=(6, 0))
         ttk.Label(top, text="Signal Cooldown (min)").pack(side="left", padx=(12, 0))
         ttk.Entry(top, textvariable=self.pf_cooldown_min_var, width=8).pack(side="left", padx=4)
         ttk.Checkbutton(top, text="Track HOLD signals", variable=self.pf_track_hold_var).pack(side="left", padx=(8, 0))
@@ -536,7 +537,7 @@ class StrataGuiApp:
         ttk.Label(pending_btns_row1, text="Set qty").pack(side="left")
         ttk.Entry(pending_btns_row1, textvariable=self.pf_pending_qty_var, width=10).pack(side="left", padx=4)
         ttk.Label(pending_btns_row1, text="type").pack(side="left")
-        ttk.Combobox(pending_btns_row1, textvariable=self.pf_pending_type_var, values=["MARKET", "LIMIT"], width=8, state="readonly").pack(side="left", padx=4)
+        ttk.Combobox(pending_btns_row1, textvariable=self.pf_pending_type_var, values=["MARKET", "LIMIT", "STOP_LOSS_LIMIT"], width=14, state="readonly").pack(side="left", padx=4)
         ttk.Button(pending_btns_row1, text="Apply to Selected", command=self._apply_pending_edit_to_selected).pack(side="left", padx=6)
         ttk.Label(pending_btns_row1, text="Auto BUY %").pack(side="left", padx=(10, 0))
         ttk.Entry(pending_btns_row1, textvariable=self.pf_auto_buy_pct_var, width=6).pack(side="left", padx=4)
@@ -3777,12 +3778,47 @@ class StrataGuiApp:
                         blocked += 1
                         continue
             self._vlog(f"Submitting order: symbol={symbol} side={side} type={order_type} qty={qty}")
+            price_arg = None
+            stop_arg = None
+            if order_type == "STOP_LOSS_LIMIT":
+                try:
+                    stop_arg = float(rec.get("stop_loss_price", 0.0) or 0.0)
+                except Exception:
+                    stop_arg = 0.0
+                try:
+                    price_arg = float(rec.get("limit_price", 0.0) or 0.0)
+                except Exception:
+                    price_arg = 0.0
+                if stop_arg <= 0:
+                    rec["status"] = "BLOCKED"
+                    rec["reason"] = "STOP_LOSS_LIMIT requires stop_loss_price > 0."
+                    blocked += 1
+                    continue
+                if not price_arg or price_arg <= 0:
+                    price_arg = float(stop_arg) * 0.995
+
+                if bool(rec.get("replace_existing_stop", False)):
+                    oo = self.bridge.list_open_binance_orders(profile_name=profile, symbol=symbol)
+                    if oo.get("ok"):
+                        for od in oo.get("orders", []) or []:
+                            if not isinstance(od, dict):
+                                continue
+                            o_side = str(od.get("side", "")).upper()
+                            o_type = str(od.get("type", "")).upper()
+                            o_status = str(od.get("status", "")).upper()
+                            oid = int(od.get("orderId", 0) or 0)
+                            if o_side == "SELL" and o_type in ("STOP_LOSS_LIMIT", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_LIMIT") and o_status in ("NEW", "PARTIALLY_FILLED") and oid > 0:
+                                self.bridge.cancel_binance_order(symbol=symbol, order_id=oid, profile_name=profile)
+                                self._vlog(f"Canceled existing protective order before replace: {symbol} oid={oid}")
+
             out = self.bridge.submit_binance_order(
                 symbol=symbol,
                 side=side,
                 order_type=order_type,
                 quantity=qty,
                 profile_name=profile,
+                price=price_arg,
+                stop_price=stop_arg,
             )
             if not out.get("ok"):
                 err_text = str(out.get("error", "submit failed"))
@@ -3975,6 +4011,240 @@ class StrataGuiApp:
         if errs:
             msg += f"\n\nFirst error:\n{errs[0]}"
         messagebox.showinfo("Reconcile Fills", msg)
+
+    def _extract_protection_plan_from_ai_text(self, text: str) -> List[Dict[str, Any]]:
+        raw = str(text or "")
+        if not raw.strip():
+            return []
+        m = re.search(
+            r"BEGIN_STRATA_PROTECTION_PLAN_JSON\s*(\{[\s\S]*?\})\s*END_STRATA_PROTECTION_PLAN_JSON",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        blob = ""
+        if m:
+            blob = m.group(1).strip()
+        else:
+            m2 = re.search(r"(\{[\s\S]*\})", raw)
+            if m2:
+                blob = m2.group(1).strip()
+        if not blob:
+            return []
+        try:
+            obj = json.loads(blob)
+        except Exception:
+            return []
+        if not isinstance(obj, dict):
+            return []
+        arr = obj.get("protections", [])
+        if not isinstance(arr, list):
+            return []
+        return [x for x in arr if isinstance(x, dict) and str(x.get("symbol", "")).strip()]
+
+    def _build_protection_ai_prompt(self, position_rows: List[Dict[str, Any]], bt_context: Dict[str, Dict[str, Any]]) -> str:
+        payload = {
+            "positions": position_rows,
+            "targeted_backtests": bt_context,
+            "constraints": {
+                "allowed_actions": ["SET_STOP", "SET_TRAILING", "HOLD"],
+                "stop_pct_bounds": [1.0, 20.0],
+                "trailing_pct_bounds": [0.5, 15.0],
+            },
+        }
+        return (
+            "You are a risk manager for open spot positions.\n"
+            "Use positions and targeted backtest context to recommend protection.\n"
+            "Return ONLY JSON between markers.\n\n"
+            "BEGIN_STRATA_PROTECTION_PLAN_JSON\n"
+            "{\n"
+            "  \"protections\": [\n"
+            "    {\n"
+            "      \"symbol\": \"BTCUSDT\",\n"
+            "      \"action\": \"SET_STOP|SET_TRAILING|HOLD\",\n"
+            "      \"stop_pct\": 5.0,\n"
+            "      \"trailing_pct\": 2.0,\n"
+            "      \"confidence\": 75,\n"
+            "      \"reason\": \"short reason\"\n"
+            "    }\n"
+            "  ]\n"
+            "}\n"
+            "END_STRATA_PROTECTION_PLAN_JSON\n\n"
+            "Data:\n"
+            + json.dumps(payload, indent=2)
+        )
+
+    def _protect_open_positions_ai(self) -> None:
+        profile = self.pf_binance_profile_var.get().strip() or None
+        if not profile:
+            messagebox.showinfo("Protection", "Select a Binance profile first.")
+            return
+        out = self.bridge.get_trade_ledger()
+        if not out.get("ok"):
+            messagebox.showerror("Protection", str(out.get("error", "Failed to load ledger.")))
+            return
+        ledger = out.get("ledger", {}) if isinstance(out.get("ledger"), dict) else {}
+        open_positions = ledger.get("open_positions", {}) if isinstance(ledger, dict) else {}
+        if not isinstance(open_positions, dict) or not open_positions:
+            messagebox.showinfo("Protection", "No open positions in ledger.")
+            return
+
+        display_ccy = self.display_currency_var.get().strip() or "USD"
+        pos_rows: List[Dict[str, Any]] = []
+        bt_context: Dict[str, Dict[str, Any]] = {}
+        for _, pos in open_positions.items():
+            if not isinstance(pos, dict):
+                continue
+            asset = str(pos.get("asset", "")).strip().upper()
+            if not asset:
+                continue
+            quote = str(pos.get("quote_currency", self._effective_crypto_quote("USDT")) or self._effective_crypto_quote("USDT")).strip().upper()
+            symbol = str(pos.get("symbol", "")).strip().upper() or f"{asset}{quote}"
+            timeframe = str(pos.get("timeframe", self.bt_tf.get() if hasattr(self, "bt_tf") else "4h") or "4h").strip().lower()
+            try:
+                qty = float(pos.get("qty", 0.0) or 0.0)
+            except Exception:
+                qty = 0.0
+            try:
+                entry_price = float(pos.get("entry_price", 0.0) or 0.0)
+            except Exception:
+                entry_price = 0.0
+            if qty <= 0:
+                continue
+            lp = self.bridge.get_binance_last_price(symbol=symbol, profile_name=profile)
+            last_price = float(lp.get("price", 0.0) or 0.0) if lp.get("ok") else 0.0
+            pnl_pct = ((last_price - entry_price) / entry_price * 100.0) if (entry_price > 0 and last_price > 0) else 0.0
+            pos_rows.append(
+                {
+                    "asset": asset,
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "qty": round(qty, 8),
+                    "entry_price": round(entry_price, 8),
+                    "last_price": round(last_price, 8),
+                    "pnl_pct": round(pnl_pct, 4),
+                }
+            )
+            # Include targeted backtest context for this symbol.
+            try:
+                bt_cfg = {
+                    "market": "crypto",
+                    "timeframe": timeframe if timeframe in ("1d", "4h", "8h", "12h") else "4h",
+                    "months": int(self.bt_months.get()) if hasattr(self, "bt_months") else 12,
+                    "top_n": 1,
+                    "quote_currency": quote,
+                    "country": parse_country_code(self.bt_country.get(), self.bt_country_manual.get()) if hasattr(self, "bt_country") else "2",
+                    "initial_capital": float(self.bt_initial.get()) if hasattr(self, "bt_initial") else 10000.0,
+                    "stop_loss_pct": float(self.bt_stop_loss.get()) if hasattr(self, "bt_stop_loss") else 8.0,
+                    "take_profit_pct": float(self.bt_take_profit.get()) if hasattr(self, "bt_take_profit") else 20.0,
+                    "max_hold_days": int(self.bt_max_hold_days.get()) if hasattr(self, "bt_max_hold_days") else 45,
+                    "min_hold_bars": int(self.bt_min_hold_bars.get()) if hasattr(self, "bt_min_hold_bars") else 2,
+                    "cooldown_bars": int(self.bt_cooldown_bars.get()) if hasattr(self, "bt_cooldown_bars") else 1,
+                    "same_asset_cooldown_bars": int(self.bt_same_asset_cooldown.get()) if hasattr(self, "bt_same_asset_cooldown") else 3,
+                    "max_consecutive_same_asset_entries": int(self.bt_max_same_asset_entries.get()) if hasattr(self, "bt_max_same_asset_entries") else 3,
+                    "fee_pct": float(self.bt_fee_pct.get()) if hasattr(self, "bt_fee_pct") else 0.10,
+                    "slippage_pct": float(self.bt_slippage_pct.get()) if hasattr(self, "bt_slippage_pct") else 0.05,
+                    "position_size": max(0.01, min(1.0, (float(self.bt_position_size_pct.get()) if hasattr(self, "bt_position_size_pct") else 30.0) / 100.0)),
+                    "atr_multiplier": float(self.bt_atr_mult.get()) if hasattr(self, "bt_atr_mult") else 2.2,
+                    "adx_threshold": float(self.bt_adx_threshold.get()) if hasattr(self, "bt_adx_threshold") else 25.0,
+                    "cmf_threshold": float(self.bt_cmf_threshold.get()) if hasattr(self, "bt_cmf_threshold") else 0.02,
+                    "obv_slope_threshold": float(self.bt_obv_threshold.get()) if hasattr(self, "bt_obv_threshold") else 0.0,
+                    "max_drawdown_limit_pct": float(self.bt_max_dd_target_pct.get()) if hasattr(self, "bt_max_dd_target_pct") else 35.0,
+                    "max_exposure_pct": max(0.01, min(1.0, (float(self.bt_max_exposure_pct.get()) if hasattr(self, "bt_max_exposure_pct") else 40.0) / 100.0)),
+                    "cache_workers": int(self.bt_cache_workers.get()) if hasattr(self, "bt_cache_workers") else 4,
+                    "buy_threshold": int(self.bt_buy_threshold.get()) if hasattr(self, "bt_buy_threshold") else 2,
+                    "sell_threshold": int(self.bt_sell_threshold.get()) if hasattr(self, "bt_sell_threshold") else -2,
+                    "display_currency": display_ccy,
+                    "tickers": [f"{asset}-USD" if quote == "USD" else f"{asset}-{quote}"],
+                }
+                bt = self.bridge.run_backtest(bt_cfg)
+                bt_context[symbol] = {"ok": bool(bt.get("ok")), "summary_text": str(bt.get("summary_text", "") or "")[:3500]}
+            except Exception as exc:
+                bt_context[symbol] = {"ok": False, "summary_text": f"Backtest context error: {type(exc).__name__}"}
+
+        if not pos_rows:
+            messagebox.showinfo("Protection", "No valid open positions found.")
+            return
+
+        prompt = self._build_protection_ai_prompt(pos_rows, bt_context)
+        dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ai_res = self.bridge.run_ai_analysis(
+            dashboard_text=json.dumps({"positions": pos_rows}),
+            datetime_context=dt,
+            prompt_override=prompt,
+            system_prompt_override=(
+                "You are a strict JSON risk assistant. "
+                "Output only the protection plan JSON between required markers."
+            ),
+        )
+        plans = self._extract_protection_plan_from_ai_text(ai_res.get("response", "")) if ai_res.get("ok") else []
+        if not plans:
+            fallback_stop = float(self.bt_stop_loss.get()) if hasattr(self, "bt_stop_loss") else 8.0
+            plans = [
+                {
+                    "symbol": p.get("symbol", ""),
+                    "action": "SET_STOP",
+                    "stop_pct": fallback_stop,
+                    "trailing_pct": 0.0,
+                    "confidence": 50,
+                    "reason": "Fallback protection (AI unavailable/empty).",
+                }
+                for p in pos_rows
+            ]
+
+        staged = 0
+        for plan in plans:
+            symbol = str(plan.get("symbol", "")).strip().upper()
+            action = str(plan.get("action", "SET_STOP")).strip().upper()
+            if not symbol or action == "HOLD":
+                continue
+            pos = next((x for x in pos_rows if str(x.get("symbol", "")).upper() == symbol), None)
+            if not pos:
+                continue
+            qty = float(pos.get("qty", 0.0) or 0.0)
+            last_price = float(pos.get("last_price", 0.0) or 0.0)
+            if qty <= 0 or last_price <= 0:
+                continue
+            try:
+                stop_pct = max(1.0, min(20.0, float(plan.get("stop_pct", 0.0) or 0.0)))
+            except Exception:
+                stop_pct = float(self.bt_stop_loss.get()) if hasattr(self, "bt_stop_loss") else 8.0
+            try:
+                trailing_pct = max(0.0, min(15.0, float(plan.get("trailing_pct", 0.0) or 0.0)))
+            except Exception:
+                trailing_pct = 0.0
+            stop_price = last_price * (1.0 - (stop_pct / 100.0))
+            limit_price = stop_price * 0.995
+            reason = str(plan.get("reason", "Protection recommendation") or "Protection recommendation").strip()
+            if trailing_pct > 0:
+                reason += f" | trailing suggested {trailing_pct:.2f}% (implemented as fixed stop for compatibility)"
+            self._pending_rec_seq += 1
+            self.pending_recommendations.append(
+                {
+                    "id": self._pending_rec_seq,
+                    "symbol": symbol,
+                    "asset": self._base_asset_from_symbol(symbol),
+                    "side": "SELL",
+                    "order_type": "STOP_LOSS_LIMIT",
+                    "quantity": qty,
+                    "stop_loss_price": round(stop_price, 8),
+                    "limit_price": round(limit_price, 8),
+                    "timeframe": str(pos.get("timeframe", "4h")),
+                    "confidence": str(plan.get("confidence", "") or ""),
+                    "status": "PENDING",
+                    "reason": reason,
+                    "replace_existing_stop": True,
+                }
+            )
+            staged += 1
+
+        self._refresh_pending_recommendations_view()
+        self._append_task_terminal(
+            f"Protect positions -> staged={staged}, positions={len(pos_rows)}, ai_ok={bool(ai_res.get('ok'))}, bt_ctx={len(bt_context)}"
+        )
+        messagebox.showinfo(
+            "Protection Recommendations",
+            f"Staged {staged} protective order recommendation(s).\nReview and submit from Pending Recommendations.",
+        )
 
     def _review_open_positions_mtf(self) -> None:
         profile = self.pf_binance_profile_var.get().strip() or None

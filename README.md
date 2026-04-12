@@ -195,6 +195,12 @@ GUI Portfolio & Ledger:
 - New `Portfolio & Ledger` tab:
   - Binance account portfolio snapshot (balances + estimated USD value)
   - `Reconcile Fills` action to backfill missing execution rows/open positions from Binance trade history
+  - `Protect Open Positions (AI+BT)` action:
+    - analyzes current open positions
+    - includes targeted backtest context for each open symbol/timeframe
+    - requests AI protection plan (`SET_STOP` / `SET_TRAILING` / `HOLD`)
+    - stages protective `STOP_LOSS_LIMIT` sell orders for review/submit
+    - trailing recommendations currently map to fixed-stop execution for compatibility (annotated in reason)
   - `Review Open Positions (MTF)` action:
     - evaluates open-position assets across `4h/8h/12h/1d`
     - logs per-timeframe actions and vote-based stance (`HOLD/ADD`, `HOLD`, `REDUCE/EXIT`)
