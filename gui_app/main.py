@@ -1025,6 +1025,7 @@ class StrataGuiApp:
         if not out.get("ok"):
             return {"ok": False, "error": str(out.get("error", "Failed to load ledger.")), "rows": []}
         ledger = out.get("ledger", {}) if isinstance(out.get("ledger"), dict) else {}
+        entries = ledger.get("entries", []) if isinstance(ledger, dict) else []
         open_positions = ledger.get("open_positions", {}) if isinstance(ledger, dict) else {}
         if not isinstance(open_positions, dict):
             open_positions = {}
@@ -1039,6 +1040,73 @@ class StrataGuiApp:
             if not sym:
                 continue
             by_symbol.setdefault(sym, []).append(o)
+
+        # Build estimated cost-basis per symbol from execution ledger history using FIFO lots.
+        lot_book: Dict[str, List[Dict[str, float]]] = {}
+        exec_rows: List[Dict[str, Any]] = []
+        if isinstance(entries, list):
+            for e in entries:
+                if not isinstance(e, dict):
+                    continue
+                if not bool(e.get("is_execution", False)):
+                    continue
+                action = str(e.get("action", "")).strip().upper()
+                if action not in ("BUY", "SELL"):
+                    continue
+                try:
+                    qty = float(e.get("qty", 0.0) or 0.0)
+                    px = float(e.get("price", 0.0) or 0.0)
+                except Exception:
+                    qty, px = 0.0, 0.0
+                if qty <= 0 or px <= 0:
+                    continue
+                sym = str(e.get("exchange_symbol", "")).strip().upper()
+                if not sym:
+                    asset = str(e.get("asset", "")).strip().upper()
+                    q = str(e.get("quote_currency", self._effective_crypto_quote("USDT")) or self._effective_crypto_quote("USDT")).strip().upper()
+                    if not asset:
+                        continue
+                    sym = f"{asset}{q}"
+                t_raw = e.get("ts", "")
+                try:
+                    t_ord = float(pd.Timestamp(pd.to_datetime(str(t_raw), utc=True, errors="coerce")).value)
+                except Exception:
+                    t_ord = float(e.get("id", 0) or 0)
+                exec_rows.append({"symbol": sym, "action": action, "qty": qty, "price": px, "ord": t_ord})
+        exec_rows.sort(key=lambda r: (float(r.get("ord", 0.0) or 0.0), str(r.get("symbol", ""))))
+        for r in exec_rows:
+            sym = str(r.get("symbol", ""))
+            action = str(r.get("action", ""))
+            qty = float(r.get("qty", 0.0) or 0.0)
+            px = float(r.get("price", 0.0) or 0.0)
+            lots = lot_book.setdefault(sym, [])
+            if action == "BUY":
+                lots.append({"qty": qty, "price": px})
+                continue
+            # SELL -> consume FIFO lots.
+            rem = qty
+            i = 0
+            while rem > 1e-12 and i < len(lots):
+                lq = float(lots[i].get("qty", 0.0) or 0.0)
+                if lq <= rem + 1e-12:
+                    rem -= lq
+                    lots[i]["qty"] = 0.0
+                    i += 1
+                else:
+                    lots[i]["qty"] = max(0.0, lq - rem)
+                    rem = 0.0
+            lot_book[sym] = [x for x in lots if float(x.get("qty", 0.0) or 0.0) > 1e-12]
+
+        cost_basis_by_symbol: Dict[str, float] = {}
+        for sym, lots in lot_book.items():
+            if not isinstance(lots, list) or not lots:
+                continue
+            tqty = sum(float(x.get("qty", 0.0) or 0.0) for x in lots)
+            if tqty <= 1e-12:
+                continue
+            notional = sum((float(x.get("qty", 0.0) or 0.0) * float(x.get("price", 0.0) or 0.0)) for x in lots)
+            if notional > 0:
+                cost_basis_by_symbol[sym] = notional / tqty
 
         # Build a merged position map so graph still works when ledger is behind:
         # 1) ledger open positions
@@ -1144,6 +1212,8 @@ class StrataGuiApp:
                 entry = float(pos.get("entry_price", 0.0) or 0.0)
             except Exception:
                 entry = 0.0
+            if entry <= 0:
+                entry = float(cost_basis_by_symbol.get(symbol, 0.0) or 0.0)
             lp = bridge.get_binance_last_price(symbol=symbol, profile_name=profile)
             current = float(lp.get("price", 0.0) or 0.0) if lp.get("ok") else 0.0
 
