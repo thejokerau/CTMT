@@ -907,6 +907,27 @@ class StrataGuiApp:
         self.root.clipboard_append(payload)
         self._append_task_terminal(f"Copied {label} to clipboard ({len(rows)} row(s)).")
 
+    def _human_readable_ts(self, value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return raw
+        try:
+            ts = pd.to_datetime(raw, utc=True, errors="raise")
+        except Exception:
+            return raw
+        try:
+            local_ts = ts.tz_convert(datetime.now().astimezone().tzinfo)
+            return local_ts.strftime("%Y-%m-%d %I:%M:%S %p %Z")
+        except Exception:
+            return str(ts)
+
+    def _humanize_df_timestamps(self, df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+        out = df.copy()
+        for c in cols:
+            if c in out.columns:
+                out[c] = out[c].apply(self._human_readable_ts)
+        return out
+
     def _configure_dashboard_tags(self, widget: tk.Text) -> None:
         # Section/header emphasis
         widget.tag_configure("hdr", foreground="#7FDBFF")
@@ -4885,6 +4906,7 @@ class StrataGuiApp:
             self.pf_open_positions_text.delete("1.0", tk.END)
             if op_rows:
                 op_df = pd.DataFrame(op_rows)
+                op_df = self._humanize_df_timestamps(op_df, ["entry_ts"])
                 preferred = [
                     "entry_id", "entry_ts", "symbol", "asset", "timeframe", "qty", "entry_price",
                     "last_price", "unreal_pnl_pct", "unreal_pnl_quote", "unreal_pnl_display",
@@ -4949,6 +4971,7 @@ class StrataGuiApp:
                     display_entries.append(e)
                 if display_entries:
                     df = pd.DataFrame(display_entries[-200:])
+                    df = self._humanize_df_timestamps(df, ["ts", "entry_ts", "exit_ts"])
                     lines.append(df.to_string(index=False))
                 else:
                     lines.append("No non-placeholder ledger entries yet.")
@@ -4961,6 +4984,7 @@ class StrataGuiApp:
             self.pf_signal_text.delete("1.0", tk.END)
             if signal_entries:
                 sig_df = pd.DataFrame(signal_entries[-200:])
+                sig_df = self._humanize_df_timestamps(sig_df, ["ts", "entry_ts", "exit_ts"])
                 self.pf_signal_text.insert("1.0", sig_df.to_string(index=False))
             else:
                 self.pf_signal_text.insert("1.0", "No signal-only entries.")
@@ -4970,6 +4994,7 @@ class StrataGuiApp:
             self.pf_execution_text.delete("1.0", tk.END)
             if visible_execution_entries:
                 exe_df = pd.DataFrame(visible_execution_entries[-200:])
+                exe_df = self._humanize_df_timestamps(exe_df, ["ts", "entry_ts", "exit_ts"])
                 for col in ["pnl_pct", "pnl_quote", "pnl_display"]:
                     if col not in exe_df.columns:
                         exe_df[col] = ""
