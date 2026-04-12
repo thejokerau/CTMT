@@ -201,6 +201,7 @@ GUI Portfolio & Ledger:
     - includes targeted backtest context for each open symbol/timeframe
     - requests AI protection plan (`SET_STOP` / `SET_TRAILING` / `SET_TAKE_PROFIT` / `SET_BOTH` / `HOLD`)
     - stages protective `STOP_LOSS_LIMIT` and `TAKE_PROFIT_LIMIT` sell orders for review/submit
+    - auto-upgrades stop-only existing protection to OCO recommendations (SL+TP) when the AI plan returns stop-only for that symbol
     - trailing recommendations currently map to fixed-stop execution for compatibility (annotated in reason)
   - Protection monitor controls:
     - configurable interval (`Protect every (min)`)

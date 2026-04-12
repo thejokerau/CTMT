@@ -5344,6 +5344,27 @@ class StrataGuiApp:
 
         display_ccy = str(cfg.get("display_currency", "USD") or "USD")
         bt_opts = cfg.get("bt", {}) if isinstance(cfg.get("bt"), dict) else {}
+        open_orders_by_symbol: Dict[str, Dict[str, bool]] = {}
+        try:
+            oo = bridge.list_open_binance_orders(profile_name=profile)
+            if isinstance(oo, dict) and oo.get("ok"):
+                for o in oo.get("orders", []) or []:
+                    if not isinstance(o, dict):
+                        continue
+                    sym = str(o.get("symbol", "")).strip().upper()
+                    if not sym:
+                        continue
+                    side = str(o.get("side", "")).strip().upper()
+                    if side != "SELL":
+                        continue
+                    typ = str(o.get("type", "")).strip().upper()
+                    st = open_orders_by_symbol.setdefault(sym, {"has_stop": False, "has_tp": False})
+                    if "STOP" in typ:
+                        st["has_stop"] = True
+                    elif ("TAKE_PROFIT" in typ) or (typ == "LIMIT_MAKER") or (typ == "LIMIT"):
+                        st["has_tp"] = True
+        except Exception:
+            open_orders_by_symbol = {}
         pos_rows: List[Dict[str, Any]] = []
         bt_context: Dict[str, Dict[str, Any]] = {}
         for _, pos in open_positions.items():
@@ -5377,6 +5398,7 @@ class StrataGuiApp:
                     "entry_price": round(entry_price, 8),
                     "last_price": round(last_price, 8),
                     "pnl_pct": round(pnl_pct, 4),
+                    "existing_protection": dict(open_orders_by_symbol.get(symbol, {"has_stop": False, "has_tp": False})),
                 }
             )
             _progress(f"Protect AI+BT: backtesting {symbol} ({timeframe})...")
@@ -5445,6 +5467,10 @@ class StrataGuiApp:
             action = str(plan.get("action", "SET_STOP")).strip().upper()
             if not symbol or action == "HOLD":
                 continue
+            ep = open_orders_by_symbol.get(symbol, {"has_stop": False, "has_tp": False})
+            auto_upgrade_to_both = bool(ep.get("has_stop")) and (not bool(ep.get("has_tp")))
+            if auto_upgrade_to_both and action in ("SET_STOP", "SET_TRAILING"):
+                action = "SET_BOTH"
             pos = next((x for x in pos_rows if str(x.get("symbol", "")).upper() == symbol), None)
             if not pos:
                 continue
@@ -5474,6 +5500,8 @@ class StrataGuiApp:
             reason = str(plan.get("reason", "Protection recommendation") or "Protection recommendation").strip()
             if trailing_pct > 0:
                 reason += f" | trailing suggested {trailing_pct:.2f}% (implemented as fixed stop for compatibility)"
+            if auto_upgrade_to_both:
+                reason += " | auto-upgraded to OCO (existing stop-only protection detected)"
             if action in ("SET_STOP", "SET_TRAILING"):
                 staged_recs.append(
                     {
