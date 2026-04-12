@@ -1031,8 +1031,11 @@ class EngineBridge:
                             "type": str(o.get("type", "") or ""),
                             "status": str(o.get("status", "") or ""),
                             "price": str(o.get("price", "") or ""),
+                            "stopPrice": str(o.get("stopPrice", "") or ""),
                             "origQty": str(o.get("origQty", "") or ""),
                             "executedQty": str(o.get("executedQty", "") or ""),
+                            "time": int(o.get("time", 0) or 0),
+                            "updateTime": int(o.get("updateTime", 0) or 0),
                         }
                     )
             return {"ok": True, "profile": active, "orders": rows}

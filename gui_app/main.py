@@ -915,6 +915,10 @@ class StrataGuiApp:
         widget.tag_configure("buy", foreground="#2ECC71")
         widget.tag_configure("hold", foreground="#F39C12")
         widget.tag_configure("sell", foreground="#E74C3C")
+        # Open position protection emphasis
+        widget.tag_configure("protected", foreground="#2ECC71")
+        widget.tag_configure("stale_protected", foreground="#F39C12")
+        widget.tag_configure("unprotected", foreground="#E74C3C")
         # Result emphasis
         widget.tag_configure("okline", foreground="#2ECC71")
         widget.tag_configure("errline", foreground="#FF6B6B")
@@ -923,7 +927,18 @@ class StrataGuiApp:
         if widget is None:
             return
         # Clear prior highlights
-        for tag in ("hdr", "subhdr", "buy", "hold", "sell", "okline", "errline"):
+        for tag in (
+            "hdr",
+            "subhdr",
+            "buy",
+            "hold",
+            "sell",
+            "protected",
+            "stale_protected",
+            "unprotected",
+            "okline",
+            "errline",
+        ):
             widget.tag_remove(tag, "1.0", tk.END)
 
         def _tag_all(needle: str, tag: str, nocase: bool = True) -> None:
@@ -949,6 +964,14 @@ class StrataGuiApp:
             _tag_all(k, "hold")
         for k in ("🔴 SELL", " SELL "):
             _tag_all(k, "sell")
+
+        # Open-position protection markers
+        for k in ("PROTECTED",):
+            _tag_all(k, "protected", nocase=False)
+        for k in ("STALE_PROTECTED",):
+            _tag_all(k, "stale_protected", nocase=False)
+        for k in ("UNPROTECTED",):
+            _tag_all(k, "unprotected", nocase=False)
 
         # Outcome markers
         for k in ("DONE", "SUCCESS", "OK"):
@@ -3806,19 +3829,64 @@ class StrataGuiApp:
                 if not price_arg or price_arg <= 0:
                     price_arg = float(stop_arg) * 0.995
 
-                if bool(rec.get("replace_existing_stop", False)):
+                if side == "SELL":
+                    # Tighten-only guard: never move a protective stop backwards for long positions.
+                    # If an existing protective stop is higher, block this update.
                     oo = self.bridge.list_open_binance_orders(profile_name=profile, symbol=symbol)
-                    if oo.get("ok"):
-                        for od in oo.get("orders", []) or []:
-                            if not isinstance(od, dict):
+                    if not oo.get("ok"):
+                        rec["status"] = "BLOCKED"
+                        rec["reason"] = (
+                            f"Could not verify existing protective stops ({oo.get('error', 'unknown')}). "
+                            "Tighten-only guard blocked update."
+                        )
+                        blocked += 1
+                        continue
+
+                    protective_orders: List[Dict[str, Any]] = []
+                    best_existing_stop = 0.0
+                    for od in oo.get("orders", []) or []:
+                        if not isinstance(od, dict):
+                            continue
+                        o_side = str(od.get("side", "")).upper()
+                        o_type = str(od.get("type", "")).upper()
+                        o_status = str(od.get("status", "")).upper()
+                        if o_side != "SELL" or o_status not in ("NEW", "PARTIALLY_FILLED"):
+                            continue
+                        if o_type not in ("STOP_LOSS_LIMIT", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_LIMIT", "TRAILING_STOP_MARKET"):
+                            continue
+                        protective_orders.append(od)
+                        try:
+                            o_stop = float(od.get("stopPrice", 0.0) or 0.0)
+                        except Exception:
+                            o_stop = 0.0
+                        if o_stop <= 0:
+                            try:
+                                o_stop = float(od.get("price", 0.0) or 0.0)
+                            except Exception:
+                                o_stop = 0.0
+                        if o_stop > best_existing_stop:
+                            best_existing_stop = o_stop
+
+                    if best_existing_stop > 0 and float(stop_arg) + 1e-12 < float(best_existing_stop):
+                        rec["status"] = "BLOCKED"
+                        rec["reason"] = (
+                            f"Tighten-only guard: new stop {float(stop_arg):.8f} is below "
+                            f"existing protective stop {float(best_existing_stop):.8f}."
+                        )
+                        self._vlog(f"Submit blocked tighten-only: {symbol} new_stop={stop_arg} existing_stop={best_existing_stop}")
+                        blocked += 1
+                        continue
+
+                    if bool(rec.get("replace_existing_stop", False)):
+                        for od in protective_orders:
+                            try:
+                                oid = int(od.get("orderId", 0) or 0)
+                            except Exception:
+                                oid = 0
+                            if oid <= 0:
                                 continue
-                            o_side = str(od.get("side", "")).upper()
-                            o_type = str(od.get("type", "")).upper()
-                            o_status = str(od.get("status", "")).upper()
-                            oid = int(od.get("orderId", 0) or 0)
-                            if o_side == "SELL" and o_type in ("STOP_LOSS_LIMIT", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_LIMIT") and o_status in ("NEW", "PARTIALLY_FILLED") and oid > 0:
-                                self.bridge.cancel_binance_order(symbol=symbol, order_id=oid, profile_name=profile)
-                                self._vlog(f"Canceled existing protective order before replace: {symbol} oid={oid}")
+                            self.bridge.cancel_binance_order(symbol=symbol, order_id=oid, profile_name=profile)
+                            self._vlog(f"Canceled existing protective order before replace: {symbol} oid={oid}")
 
             out = self.bridge.submit_binance_order(
                 symbol=symbol,
@@ -3879,6 +3947,41 @@ class StrataGuiApp:
                 except Exception:
                     sl = 0.0
                 if sl > 0:
+                    # Tighten-only guard for auto protective placement after BUY:
+                    # if a stronger (higher) protective stop already exists, keep it.
+                    try:
+                        oo = self.bridge.list_open_binance_orders(profile_name=profile, symbol=symbol)
+                    except Exception:
+                        oo = {"ok": False}
+                    if oo.get("ok"):
+                        best_existing_stop = 0.0
+                        for od in oo.get("orders", []) or []:
+                            if not isinstance(od, dict):
+                                continue
+                            o_side = str(od.get("side", "")).upper()
+                            o_type = str(od.get("type", "")).upper()
+                            o_status = str(od.get("status", "")).upper()
+                            if o_side != "SELL" or o_status not in ("NEW", "PARTIALLY_FILLED"):
+                                continue
+                            if o_type not in ("STOP_LOSS_LIMIT", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_LIMIT", "TRAILING_STOP_MARKET"):
+                                continue
+                            try:
+                                o_stop = float(od.get("stopPrice", 0.0) or 0.0)
+                            except Exception:
+                                o_stop = 0.0
+                            if o_stop <= 0:
+                                try:
+                                    o_stop = float(od.get("price", 0.0) or 0.0)
+                                except Exception:
+                                    o_stop = 0.0
+                            if o_stop > best_existing_stop:
+                                best_existing_stop = o_stop
+                        if best_existing_stop > 0 and sl < best_existing_stop:
+                            self._vlog(
+                                f"Tighten-only guard adjusted BUY protective stop for {symbol}: "
+                                f"{sl:.8f} -> {best_existing_stop:.8f}"
+                            )
+                            sl = float(best_existing_stop)
                     stop_limit = sl * 0.995
                     stop_out = self.bridge.submit_binance_order(
                         symbol=symbol,
@@ -4638,6 +4741,29 @@ class StrataGuiApp:
         unrealized_quote: Dict[str, float] = {}
         unrealized_display: Dict[str, float] = {}
         op_rows: List[Dict[str, Any]] = []
+        protective_orders_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+        if profile_name:
+            try:
+                oout = self.bridge.list_open_binance_orders(profile_name=profile_name, symbol="")
+                if oout.get("ok"):
+                    for o in (oout.get("orders", []) or []):
+                        if not isinstance(o, dict):
+                            continue
+                        sym = str(o.get("symbol", "") or "").strip().upper()
+                        side = str(o.get("side", "") or "").strip().upper()
+                        otype = str(o.get("type", "") or "").strip().upper()
+                        # Treat sell-side stop / trailing / take-profit orders as protective overlays.
+                        is_protective = side == "SELL" and (
+                            ("STOP" in otype)
+                            or ("TAKE_PROFIT" in otype)
+                            or ("TRAILING" in otype)
+                        )
+                        if not sym or not is_protective:
+                            continue
+                        protective_orders_by_symbol.setdefault(sym, []).append(o)
+            except Exception:
+                protective_orders_by_symbol = {}
+
         if isinstance(open_positions, dict):
             for _, pos in open_positions.items():
                 if not isinstance(pos, dict):
@@ -4681,12 +4807,45 @@ class StrataGuiApp:
                     unrealized_quote[quote_ccy] = unrealized_quote.get(quote_ccy, 0.0) + upnl_q
                 if abs(upnl_d) > 0:
                     unrealized_display[display_ccy] = unrealized_display.get(display_ccy, 0.0) + upnl_d
+
+                # Protection status:
+                # - PROTECTED: has at least one protective open order
+                # - STALE_PROTECTED: protective order exists but latest update/time > 24h old
+                # - UNPROTECTED: no protective open order detected
+                prot_state = "UNPROTECTED"
+                prot_detail = ""
+                now_utc = pd.Timestamp.now(tz="UTC")
+                prot_orders = protective_orders_by_symbol.get(symbol, [])
+                if prot_orders:
+                    newest_ts = None
+                    otypes: List[str] = []
+                    for po in prot_orders:
+                        otypes.append(str(po.get("type", "") or "").strip().upper())
+                        try:
+                            t_ms = int(po.get("updateTime", 0) or po.get("time", 0) or 0)
+                        except Exception:
+                            t_ms = 0
+                        if t_ms > 0:
+                            ts = pd.to_datetime(t_ms, unit="ms", utc=True, errors="coerce")
+                            if pd.notna(ts):
+                                if newest_ts is None or ts > newest_ts:
+                                    newest_ts = ts
+                    if newest_ts is not None:
+                        age_h = (now_utc - newest_ts).total_seconds() / 3600.0
+                        prot_state = "STALE_PROTECTED" if age_h > 24.0 else "PROTECTED"
+                        prot_detail = f"{','.join(sorted(set(otypes)))} @ {newest_ts.strftime('%Y-%m-%d %H:%MZ')}"
+                    else:
+                        prot_state = "PROTECTED"
+                        prot_detail = ",".join(sorted(set(otypes)))
+
                 row["symbol"] = symbol
                 row["quote_currency"] = quote_ccy
                 row["last_price"] = round(last_px, 8) if last_px > 0 else ""
                 row["unreal_pnl_quote"] = round(upnl_q, 8)
                 row["unreal_pnl_pct"] = round(upnl_pct, 4)
                 row["unreal_pnl_display"] = round(upnl_d, 8)
+                row["protection_status"] = prot_state
+                row["protection_detail"] = prot_detail
                 op_rows.append(row)
 
         if hasattr(self, "pf_open_positions_text"):
@@ -4696,7 +4855,7 @@ class StrataGuiApp:
                 preferred = [
                     "entry_id", "entry_ts", "symbol", "asset", "timeframe", "qty", "entry_price",
                     "last_price", "unreal_pnl_pct", "unreal_pnl_quote", "unreal_pnl_display",
-                    "quote_currency", "display_currency", "panel",
+                    "quote_currency", "display_currency", "protection_status", "protection_detail", "panel",
                 ]
                 cols = [c for c in preferred if c in op_df.columns] + [c for c in op_df.columns if c not in preferred]
                 op_df = op_df[cols]
