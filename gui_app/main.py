@@ -197,8 +197,8 @@ class StrataGuiApp:
         split = self._create_paned(self.live_tab, orient="horizontal")
         left = ttk.Frame(split, padding=8)
         right = ttk.Frame(split, padding=8)
-        split.add(left)
-        split.add(right)
+        split.add(left, weight=1)
+        split.add(right, weight=3)
 
         ttk.Label(left, text="Panels").pack(anchor="w")
         self.panel_list = tk.Listbox(left, width=40, height=18, selectmode="extended")
@@ -273,8 +273,8 @@ class StrataGuiApp:
         split = self._create_paned(self.backtest_tab, orient="vertical")
         top = ttk.Frame(split, padding=8)
         out = ttk.Frame(split, padding=8)
-        split.add(top)
-        split.add(out)
+        split.add(top, weight=1)
+        split.add(out, weight=3)
 
         self.bt_market = tk.StringVar(value="crypto")
         self.bt_tf = tk.StringVar(value="1d")
@@ -358,8 +358,8 @@ class StrataGuiApp:
         split = self._create_paned(self.ai_tab, orient="vertical")
         top = ttk.Frame(split, padding=8)
         body = ttk.Frame(split, padding=8)
-        split.add(top)
-        split.add(body)
+        split.add(top, weight=1)
+        split.add(body, weight=3)
 
         self.ai_source = tk.StringVar(value="live")
         self.ai_datetime = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -431,8 +431,8 @@ class StrataGuiApp:
         split = self._create_paned(self.agent_tab, orient="vertical")
         top = ttk.Frame(split, padding=8)
         body = ttk.Frame(split, padding=8)
-        split.add(top)
-        split.add(body)
+        split.add(top, weight=1)
+        split.add(body, weight=3)
 
         self.agent_mode_var = tk.StringVar(value="plan")
         self.agent_cmd_var = tk.StringVar(value="find me the best buys across the top 10 crypto coins on 4h and keep risk tight")
@@ -473,8 +473,8 @@ class StrataGuiApp:
         split = self._create_paned(self.portfolio_tab, orient="vertical")
         top = ttk.Frame(split, padding=8)
         body = ttk.Frame(split, padding=8)
-        split.add(top)
-        split.add(body)
+        split.add(top, weight=1)
+        split.add(body, weight=4)
 
         self.pf_binance_profile_var = tk.StringVar(value="")
         self.pf_exec_mode_var = tk.StringVar(value="semi_auto")
@@ -610,8 +610,8 @@ class StrataGuiApp:
         right = ttk.LabelFrame(cols, text="Open Positions (Ledger)", padding=6)
         cols_split = self._create_paned(cols, orient="horizontal")
         cols_split.pack(fill="both", expand=True)
-        cols_split.add(left)
-        cols_split.add(right)
+        cols_split.add(left, weight=1)
+        cols_split.add(right, weight=1)
 
         pf_portfolio_frame, self.pf_portfolio_text = self._create_scrolled_text(left, wrap="none")
         pf_portfolio_frame.pack(fill="both", expand=True)
@@ -648,7 +648,7 @@ class StrataGuiApp:
     def _build_research_tab(self) -> None:
         split = self._create_paned(self.research_tab, orient="vertical")
         top = ttk.Frame(split, padding=8)
-        split.add(top)
+        split.add(top, weight=1)
         self.rs_market_scope = tk.StringVar(value="both")
         self.rs_quote = tk.StringVar(value="USD")
         self.rs_country = tk.StringVar(value=country_code_to_display("2"))
@@ -675,7 +675,7 @@ class StrataGuiApp:
         self.btn_run_research_comp.pack(side="left")
 
         rs_host = ttk.Frame(split, padding=8)
-        split.add(rs_host)
+        split.add(rs_host, weight=3)
         rs_frame, self.rs_output = self._create_scrolled_text(rs_host, wrap="none")
         rs_frame.pack(fill="both", expand=True, padx=8, pady=8)
 
@@ -683,8 +683,8 @@ class StrataGuiApp:
         split = self._create_paned(self.task_tab, orient="vertical")
         top = ttk.Frame(split, padding=8)
         body = ttk.Frame(split, padding=8)
-        split.add(top)
-        split.add(body)
+        split.add(top, weight=1)
+        split.add(body, weight=4)
 
         ttk.Button(top, text="Refresh", command=self._refresh_task_tab).pack(side="left")
         self.btn_pause_queue = ttk.Button(top, text="Pause Queue", command=self._toggle_queue_pause)
@@ -699,8 +699,8 @@ class StrataGuiApp:
         right = ttk.LabelFrame(cols, text="Queued", padding=6)
         cols_split = self._create_paned(cols, orient="horizontal")
         cols_split.pack(fill="both", expand=True)
-        cols_split.add(left)
-        cols_split.add(right)
+        cols_split.add(left, weight=1)
+        cols_split.add(right, weight=1)
 
         self.running_list = tk.Listbox(left, height=12)
         self.running_list.pack(fill="both", expand=True)
@@ -710,7 +710,7 @@ class StrataGuiApp:
         logs_split = self._create_paned(body, orient="vertical")
         logs_split.pack(fill="both", expand=True, pady=(8, 0))
         task_out_frame, self.task_tab_output = self._create_scrolled_text(logs_split, height=4, wrap="none")
-        logs_split.add(task_out_frame)
+        logs_split.add(task_out_frame, weight=1)
         task_term_frame, self.task_terminal = self._create_scrolled_text(
             logs_split,
             height=12,
@@ -719,7 +719,7 @@ class StrataGuiApp:
             fg="#9CF5C6",
             insertbackground="#9CF5C6",
         )
-        logs_split.add(task_term_frame)
+        logs_split.add(task_term_frame, weight=3)
         self.task_terminal.insert("1.0", "STRATA Task Terminal\n")
         term_btns = ttk.Frame(body)
         term_btns.pack(fill="x", pady=(6, 0))
@@ -731,7 +731,7 @@ class StrataGuiApp:
     def _build_settings_tab(self) -> None:
         split = self._create_paned(self.settings_tab, orient="vertical")
         frame = ttk.Frame(split, padding=8)
-        split.add(frame)
+        split.add(frame, weight=3)
 
         self.display_currency_var = tk.StringVar(value=self.state.get("display_currency", "USD"))
         self._labeled_combo(frame, "Display Currency", self.display_currency_var, ["USD", "AUD", "EUR", "GBP", "CAD", "JPY", "NZD", "SGD", "HKD", "CHF"])
@@ -821,7 +821,7 @@ class StrataGuiApp:
         ttk.Button(frame, text="Save Settings", command=self._persist_state).pack(fill="x")
 
         settings_frame, self.settings_output = self._create_scrolled_text(split, height=8, wrap="none")
-        split.add(settings_frame)
+        split.add(settings_frame, weight=1)
         settings_btns = ttk.Frame(frame)
         settings_btns.pack(fill="x", pady=(6, 0))
         ttk.Button(settings_btns, text="Copy Settings Log", command=lambda: self._copy_text_widget(self.settings_output, "Settings log")).pack(side="left")
