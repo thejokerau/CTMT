@@ -10,6 +10,12 @@ It reflects the platform workflow:
 - **Allocation**: size positions using balance, confidence, and constraints
 - **Trade Automation**: stage, approve, execute, reconcile, and monitor
 
+## Architecture Docs
+
+- HLD Diagram: `HLD_Diagram.svg`
+- High-Level Design: `docs/HLD.md`
+- Detailed Design: `docs/DETAILED_DESIGN.md`
+
 ## Release & Branch Strategy (Best Practice)
 
 Use separate long-lived branches for release channels:
