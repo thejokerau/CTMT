@@ -980,6 +980,42 @@ class EngineBridge:
                 return {"ok": False, "error": f"Unable to fetch last price for {sym}."}
             return {"ok": True, "symbol": sym, "price": float(px)}
 
+    def get_binance_symbol_filters(self, symbol: str, profile_name: Optional[str] = None) -> Dict[str, Any]:
+        with self._lock:
+            sym = str(symbol).strip().upper()
+            if not sym:
+                return {"ok": False, "error": "Symbol is required."}
+            _, profile, _, err = self._resolve_active_binance_profile(profile_name)
+            if err:
+                return {"ok": False, "error": err}
+            endpoint = str((profile or {}).get("endpoint", self._default_binance_endpoint()) or self._default_binance_endpoint())
+            info = self._get_symbol_exchange_info(endpoint, sym)
+            if not info:
+                return {"ok": False, "error": f"Unable to load exchange info for {sym}."}
+            filters = info.get("filters", []) if isinstance(info, dict) else []
+            if not isinstance(filters, list):
+                filters = []
+            f_map: Dict[str, Dict[str, Any]] = {}
+            for f in filters:
+                if isinstance(f, dict):
+                    k = str(f.get("filterType", "")).strip()
+                    if k:
+                        f_map[k] = f
+            min_notional = 0.0
+            mn = f_map.get("MIN_NOTIONAL", {})
+            nt = f_map.get("NOTIONAL", {})
+            try:
+                if isinstance(mn, dict):
+                    min_notional = max(min_notional, float(mn.get("minNotional", 0.0) or 0.0))
+            except Exception:
+                pass
+            try:
+                if isinstance(nt, dict):
+                    min_notional = max(min_notional, float(nt.get("minNotional", 0.0) or 0.0))
+            except Exception:
+                pass
+            return {"ok": True, "symbol": sym, "min_notional": float(min_notional)}
+
     def list_binance_profiles(self) -> Dict[str, Any]:
         with self._lock:
             prefs = load_binance_preferences()

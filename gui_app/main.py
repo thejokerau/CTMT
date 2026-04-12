@@ -495,6 +495,7 @@ class StrataGuiApp:
         self.pf_manual_tf_var = tk.StringVar(value="1d")
         self.pf_manual_note_var = tk.StringVar(value="")
         self.pf_pending_qty_var = tk.StringVar(value="0")
+        self.pf_pending_notional_var = tk.StringVar(value="10")
         self.pf_pending_type_var = tk.StringVar(value="MARKET")
         self.pf_auto_buy_pct_var = tk.StringVar(value="10")
         self.pf_auto_sell_pct_var = tk.StringVar(value="100")
@@ -537,7 +538,7 @@ class StrataGuiApp:
         pending_frame.pack(fill="x", expand=False, padx=8, pady=(0, 8))
         pending_tree_frame, self.pending_tree = self._create_scrolled_tree(
             pending_frame,
-            columns=("id", "symbol", "side", "type", "qty", "stop", "tp", "tf", "conf", "status", "reason"),
+            columns=("id", "symbol", "side", "type", "qty", "notional", "minN", "stop", "tp", "tf", "conf", "status", "reason"),
             show="headings",
             height=6,
             selectmode="extended",
@@ -548,6 +549,8 @@ class StrataGuiApp:
             ("side", 60),
             ("type", 70),
             ("qty", 80),
+            ("notional", 90),
+            ("minN", 80),
             ("stop", 90),
             ("tp", 90),
             ("tf", 50),
@@ -571,6 +574,9 @@ class StrataGuiApp:
             state="readonly",
         ).pack(side="left", padx=4)
         ttk.Button(pending_btns_row1, text="Apply to Selected", command=self._apply_pending_edit_to_selected).pack(side="left", padx=6)
+        ttk.Label(pending_btns_row1, text="Set quote notional").pack(side="left", padx=(10, 0))
+        ttk.Entry(pending_btns_row1, textvariable=self.pf_pending_notional_var, width=8).pack(side="left", padx=4)
+        ttk.Button(pending_btns_row1, text="Apply Notional", command=self._apply_pending_notional_to_selected).pack(side="left", padx=4)
         ttk.Label(pending_btns_row1, text="Auto BUY %").pack(side="left", padx=(10, 0))
         ttk.Entry(pending_btns_row1, textvariable=self.pf_auto_buy_pct_var, width=6).pack(side="left", padx=4)
         ttk.Label(pending_btns_row1, text="Auto SELL %").pack(side="left")
@@ -3710,6 +3716,8 @@ class StrataGuiApp:
                 r.get("side", ""),
                 r.get("order_type", "MARKET"),
                 r.get("quantity", 0),
+                r.get("quote_notional", ""),
+                r.get("min_notional", ""),
                 r.get("stop_loss_price", ""),
                 r.get("take_profit_price", ""),
                 r.get("timeframe", ""),
@@ -3820,6 +3828,97 @@ class StrataGuiApp:
                 changed += 1
         self._refresh_pending_recommendations_view()
         self._append_task_terminal(f"Updated {changed} pending recommendation(s).")
+
+    def _apply_pending_notional_to_selected(self) -> None:
+        ids = set(self._selected_pending_ids())
+        if not ids:
+            messagebox.showinfo("Pending Orders", "Select rows first.")
+            return
+        try:
+            notional_target = float((self.pf_pending_notional_var.get() or "0").strip())
+        except Exception:
+            notional_target = 0.0
+        if notional_target <= 0:
+            messagebox.showinfo("Pending Orders", "Set quote notional > 0.")
+            return
+        profile = self.pf_binance_profile_var.get().strip() or None
+        if not profile:
+            messagebox.showinfo("Pending Orders", "Select a Binance profile first.")
+            return
+        updated = 0
+        blocked = 0
+        for r in self.pending_recommendations:
+            if int(r.get("id", -1)) not in ids:
+                continue
+            symbol = str(r.get("symbol", "")).strip().upper()
+            side = str(r.get("side", "")).strip().upper()
+            otype = str(r.get("order_type", "MARKET")).strip().upper()
+            if not symbol or side not in ("BUY", "SELL"):
+                blocked += 1
+                r["status"] = "BLOCKED"
+                r["reason"] = "Missing symbol/side for notional sizing."
+                continue
+            p = self.bridge.get_binance_last_price(symbol=symbol, profile_name=profile)
+            if not p.get("ok"):
+                blocked += 1
+                r["status"] = "BLOCKED"
+                r["reason"] = str(p.get("error", "Failed to fetch price for notional sizing."))
+                continue
+            try:
+                px = float(p.get("price", 0.0) or 0.0)
+            except Exception:
+                px = 0.0
+            if px <= 0:
+                blocked += 1
+                r["status"] = "BLOCKED"
+                r["reason"] = "Invalid market price for notional sizing."
+                continue
+            qty_guess = float(notional_target) / float(px)
+            validate_type = "MARKET" if otype == "OCO_BRACKET" else otype
+            v = self.bridge.validate_binance_order(
+                symbol=symbol,
+                side=side,
+                order_type=validate_type,
+                quantity=qty_guess,
+                profile_name=profile,
+            )
+            # Capture symbol minNotional for easier interpretation in UI.
+            sf = self.bridge.get_binance_symbol_filters(symbol=symbol, profile_name=profile)
+            if sf.get("ok"):
+                try:
+                    r["min_notional"] = round(float(sf.get("min_notional", 0.0) or 0.0), 4)
+                except Exception:
+                    pass
+            if not v.get("ok"):
+                blocked += 1
+                r["status"] = "BLOCKED"
+                r["reason"] = str(v.get("error", "Notional sizing failed validation."))
+                try:
+                    r["quote_notional"] = round(float(notional_target), 4)
+                except Exception:
+                    r["quote_notional"] = notional_target
+                continue
+            try:
+                nq = float(v.get("normalized_quantity", 0.0) or 0.0)
+            except Exception:
+                nq = 0.0
+            if nq <= 0:
+                blocked += 1
+                r["status"] = "BLOCKED"
+                r["reason"] = "Notional-sized quantity normalized to zero."
+                continue
+            r["quantity"] = nq
+            try:
+                r["quote_notional"] = round(float(nq * px), 4)
+            except Exception:
+                r["quote_notional"] = ""
+            r["status"] = "PENDING"
+            r["reason"] = f"Sized by quote notional target {notional_target:.4f}."
+            updated += 1
+        self._refresh_pending_recommendations_view()
+        self._append_task_terminal(
+            f"Applied quote-notional sizing: updated={updated}, blocked={blocked}, target={notional_target:.4f} {self._effective_crypto_quote('USDT')}"
+        )
 
     def _base_asset_from_symbol(self, symbol: str) -> str:
         s = str(symbol).strip().upper()
@@ -4070,6 +4169,18 @@ class StrataGuiApp:
                 rec["reason"] = "Auto-size normalized qty is zero."
                 continue
             rec["quantity"] = nqty
+            p2 = self.bridge.get_binance_last_price(symbol=symbol, profile_name=profile)
+            try:
+                px2 = float(p2.get("price", 0.0) or 0.0) if p2.get("ok") else 0.0
+            except Exception:
+                px2 = 0.0
+            rec["quote_notional"] = round(float(nqty * px2), 4) if px2 > 0 else ""
+            sf = self.bridge.get_binance_symbol_filters(symbol=symbol, profile_name=profile)
+            if sf.get("ok"):
+                try:
+                    rec["min_notional"] = round(float(sf.get("min_notional", 0.0) or 0.0), 4)
+                except Exception:
+                    pass
             rec["status"] = "PENDING"
             rec["reason"] = f"Auto-sized ({side}) using available balance and Binance filters."
             updated += 1

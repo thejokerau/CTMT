@@ -215,6 +215,8 @@ GUI Portfolio & Ledger:
   - Manual ledger event entry (`BUY/SELL/HOLD`)
   - Current open-position tracking + historical ledger view
   - AI recommendation staging queue with selective approval/submit flow
+  - Pending queue can now size selected rows by quote notional target (for example USDT amount) instead of raw qty
+  - Pending table shows estimated quote notional and symbol min-notional for faster filter debugging
   - auto-sizing for selected pending trades:
     - BUY uses configurable `%` of available quote balance (for example USDT)
     - SELL uses configurable `%` of available base-asset balance
