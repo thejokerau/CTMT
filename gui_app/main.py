@@ -868,6 +868,8 @@ class StrataGuiApp:
         self.pg_profile_var = tk.StringVar(value="")
         self.pg_auto_refresh_var = tk.BooleanVar(value=True)
         self.pg_auto_refresh_secs_var = tk.StringVar(value="45")
+        self.pg_canvas_height_var = tk.StringVar(value="520")
+        self.pg_row_height_var = tk.StringVar(value="58")
         self.pg_summary_var = tk.StringVar(value="No data loaded yet.")
         self.pg_rows: List[Dict[str, Any]] = []
 
@@ -879,12 +881,21 @@ class StrataGuiApp:
         ttk.Label(top, text="Auto refresh (s)").pack(side="left", padx=(10, 0))
         ttk.Entry(top, textvariable=self.pg_auto_refresh_secs_var, width=6).pack(side="left", padx=4)
         ttk.Checkbutton(top, text="While on this tab", variable=self.pg_auto_refresh_var).pack(side="left", padx=(4, 0))
+        ttk.Label(top, text="Canvas H").pack(side="left", padx=(10, 0))
+        ttk.Entry(top, textvariable=self.pg_canvas_height_var, width=6).pack(side="left", padx=4)
+        ttk.Label(top, text="Row H").pack(side="left", padx=(6, 0))
+        ttk.Entry(top, textvariable=self.pg_row_height_var, width=5).pack(side="left", padx=4)
+        ttk.Button(top, text="Apply Size", command=self._update_position_graph_sizing).pack(side="left", padx=(6, 0))
+        ttk.Button(top, text="Graph -", command=lambda: self._bump_position_graph_height(-120)).pack(side="left", padx=(6, 0))
+        ttk.Button(top, text="Graph +", command=lambda: self._bump_position_graph_height(120)).pack(side="left", padx=(4, 0))
 
         summary = ttk.Label(body, textvariable=self.pg_summary_var, anchor="w")
         summary.pack(fill="x", pady=(0, 6))
 
         graph_frame = ttk.Frame(body)
         graph_frame.pack(fill="both", expand=True)
+        self.pg_graph_frame = graph_frame
+        self.pg_graph_frame.pack_propagate(False)
         self.pg_canvas = tk.Canvas(graph_frame, bg="#0f1115", highlightthickness=0)
         self.pg_canvas.grid(row=0, column=0, sticky="nsew")
         self.pg_ybar = ttk.Scrollbar(graph_frame, orient="vertical", command=self.pg_canvas.yview)
@@ -897,7 +908,36 @@ class StrataGuiApp:
         self.pg_canvas.bind("<Configure>", lambda _e: self._draw_position_graph())
 
         self._sync_position_graph_profile()
+        self._update_position_graph_sizing()
         self._draw_position_graph()
+
+    def _update_position_graph_sizing(self) -> None:
+        try:
+            h = max(260, min(2400, int((self.pg_canvas_height_var.get() or "520").strip())))
+        except Exception:
+            h = 520
+            self.pg_canvas_height_var.set("520")
+        try:
+            rh = max(36, min(220, int((self.pg_row_height_var.get() or "58").strip())))
+        except Exception:
+            rh = 58
+            self.pg_row_height_var.set("58")
+        if hasattr(self, "pg_graph_frame"):
+            try:
+                self.pg_graph_frame.configure(height=h)
+            except Exception:
+                pass
+        self.pg_canvas_height_var.set(str(h))
+        self.pg_row_height_var.set(str(rh))
+        self._draw_position_graph()
+
+    def _bump_position_graph_height(self, delta: int) -> None:
+        try:
+            cur = int((self.pg_canvas_height_var.get() or "520").strip())
+        except Exception:
+            cur = 520
+        self.pg_canvas_height_var.set(str(max(260, min(2400, cur + int(delta)))))
+        self._update_position_graph_sizing()
 
     def _sync_position_graph_profile(self) -> None:
         try:
@@ -1141,6 +1181,10 @@ class StrataGuiApp:
         c = self.pg_canvas
         c.delete("all")
         rows = self.pg_rows if isinstance(getattr(self, "pg_rows", []), list) else []
+        try:
+            row_h = max(36, min(220, int((self.pg_row_height_var.get() or "58").strip())))
+        except Exception:
+            row_h = 58
         if not rows:
             c.create_text(20, 20, text="No open positions to graph.", fill="#d5d8dc", anchor="nw", font=("Segoe UI", 10, "bold"))
             c.configure(scrollregion=(0, 0, max(c.winfo_width(), 800), 120))
@@ -1150,7 +1194,6 @@ class StrataGuiApp:
         left_col = 260
         right_pad = 120
         graph_w = max(420, w - left_col - right_pad)
-        row_h = 58
         top = 50
         total_h = top + (len(rows) * row_h) + 70
 
