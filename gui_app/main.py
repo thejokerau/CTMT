@@ -604,10 +604,11 @@ class StrataGuiApp:
         open_orders_frame.pack(fill="x", expand=False, pady=(6, 0))
 
         cols = ttk.Frame(body)
-        cols.pack(fill="x", expand=False)
+        cols.pack(fill="both", expand=False, pady=(0, 8))
         left = ttk.LabelFrame(cols, text="Current Portfolio (Binance)", padding=6)
         right = ttk.LabelFrame(cols, text="Open Positions (Ledger)", padding=6)
         cols_split = self._create_paned(cols, orient="horizontal")
+        cols_split.configure(height=220)
         cols_split.pack(fill="both", expand=True)
         cols_split.add(left, weight=1)
         cols_split.add(right, weight=1)
