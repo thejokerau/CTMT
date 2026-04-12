@@ -3886,7 +3886,7 @@ class StrataGuiApp:
             sf = self.bridge.get_binance_symbol_filters(symbol=symbol, profile_name=profile)
             if sf.get("ok"):
                 try:
-                    r["min_notional"] = round(float(sf.get("min_notional", 0.0) or 0.0), 4)
+                    r["min_notional"] = self._format_notional_with_quote(float(sf.get("min_notional", 0.0) or 0.0), symbol)
                 except Exception:
                     pass
             if not v.get("ok"):
@@ -3909,7 +3909,7 @@ class StrataGuiApp:
                 continue
             r["quantity"] = nq
             try:
-                r["quote_notional"] = round(float(nq * px), 4)
+                r["quote_notional"] = self._format_notional_with_quote(float(nq * px), symbol)
             except Exception:
                 r["quote_notional"] = ""
             r["status"] = "PENDING"
@@ -3956,6 +3956,16 @@ class StrataGuiApp:
             return float(m.group(1))
         except Exception:
             return None
+
+    def _format_notional_with_quote(self, value: float, symbol: str) -> str:
+        try:
+            v = float(value or 0.0)
+        except Exception:
+            v = 0.0
+        q = self._quote_asset_from_symbol(symbol)
+        if v <= 0:
+            return ""
+        return f"{v:.4f} {q}"
 
     def _balances_free_map(self) -> Dict[str, float]:
         out: Dict[str, float] = {}
@@ -4026,6 +4036,59 @@ class StrataGuiApp:
             if free_b > 0 and nq > free_b:
                 return None, f"Need ~{nq:.8f} {base} for minNotional-adjusted SELL, available {free_b:.8f}."
         return nq, f"Auto-adjusted qty to satisfy minNotional ({min_notional}) at px {px:.6f}."
+
+    def _attempt_min_notional_qty_adjustment_for_oco(
+        self,
+        symbol: str,
+        min_notional: float,
+        take_profit_price: float,
+        stop_limit_price: float,
+        profile: Optional[str],
+        free_by_asset: Dict[str, float],
+    ) -> Tuple[Optional[float], str]:
+        if min_notional <= 0:
+            return None, "Invalid minNotional for OCO."
+        try:
+            tp = float(take_profit_price or 0.0)
+            sl = float(stop_limit_price or 0.0)
+        except Exception:
+            return None, "Invalid OCO prices for minNotional adjustment."
+        ref_px = min([x for x in [tp, sl] if x > 0], default=0.0)
+        if ref_px <= 0:
+            return None, "Missing OCO reference prices for minNotional adjustment."
+        qty_guess = (float(min_notional) * 1.02) / float(ref_px)
+        v_lim = self.bridge.validate_binance_order(
+            symbol=symbol,
+            side="SELL",
+            order_type="LIMIT",
+            quantity=qty_guess,
+            profile_name=profile,
+            price=tp,
+        )
+        if not v_lim.get("ok"):
+            return None, str(v_lim.get("error", "OCO limit leg still fails after minNotional adjustment."))
+        try:
+            nq = float(v_lim.get("normalized_quantity", 0.0) or 0.0)
+        except Exception:
+            nq = 0.0
+        if nq <= 0:
+            return None, "OCO adjusted qty normalized to zero."
+        v_stop = self.bridge.validate_binance_order(
+            symbol=symbol,
+            side="SELL",
+            order_type="STOP_LOSS_LIMIT",
+            quantity=nq,
+            profile_name=profile,
+            price=sl,
+            stop_price=sl,
+        )
+        if not v_stop.get("ok"):
+            return None, str(v_stop.get("error", "OCO stop leg still fails after minNotional adjustment."))
+        base = self._base_asset_from_symbol(symbol)
+        free_b = float(free_by_asset.get(base, 0.0) or 0.0)
+        if free_b > 0 and nq > free_b:
+            return None, f"Need ~{nq:.8f} {base} for OCO minNotional-adjusted SELL, available {free_b:.8f}."
+        return nq, f"Auto-adjusted OCO qty to satisfy minNotional ({min_notional}) using ref price {ref_px:.6f}."
 
     def _confidence_multiplier(self, raw: Any) -> float:
         if not bool(self.pf_auto_confidence_var.get()):
@@ -4178,7 +4241,7 @@ class StrataGuiApp:
             sf = self.bridge.get_binance_symbol_filters(symbol=symbol, profile_name=profile)
             if sf.get("ok"):
                 try:
-                    rec["min_notional"] = round(float(sf.get("min_notional", 0.0) or 0.0), 4)
+                    rec["min_notional"] = self._format_notional_with_quote(float(sf.get("min_notional", 0.0) or 0.0), symbol)
                 except Exception:
                     pass
             rec["status"] = "PENDING"
@@ -4336,15 +4399,56 @@ class StrataGuiApp:
                     profile_name=profile,
                 )
                 if not out.get("ok"):
-                    rec["status"] = "FAILED"
-                    rec["reason"] = str(out.get("error", "OCO submit failed"))
-                    self._vlog(f"OCO submit failed: symbol={symbol} error={rec['reason']}")
-                    failed += 1
-                    continue
+                    err_text = str(out.get("error", "OCO submit failed"))
+                    min_n = self._parse_min_notional_from_error(err_text)
+                    if min_n is not None:
+                        adj_qty, adj_note = self._attempt_min_notional_qty_adjustment_for_oco(
+                            symbol=symbol,
+                            min_notional=min_n,
+                            take_profit_price=float(tp_arg or 0.0),
+                            stop_limit_price=float(price_arg or 0.0),
+                            profile=profile,
+                            free_by_asset=free_by_asset,
+                        )
+                        if adj_qty is not None and adj_qty > 0:
+                            self._vlog(f"Retry OCO submit with minNotional-adjusted qty: {adj_qty} ({symbol})")
+                            out2 = self.bridge.submit_binance_oco_sell(
+                                symbol=symbol,
+                                quantity=adj_qty,
+                                take_profit_price=tp_arg,
+                                stop_price=stop_arg,
+                                stop_limit_price=price_arg,
+                                profile_name=profile,
+                            )
+                            if out2.get("ok"):
+                                out = out2
+                                qty = adj_qty
+                                rec["reason"] = f"{rec.get('reason','')} | {adj_note}".strip(" |")
+                            else:
+                                err_text = f"{err_text} | retry failed: {out2.get('error', 'OCO submit failed')}"
+                    if not out.get("ok"):
+                        rec["status"] = "FAILED"
+                        rec["reason"] = err_text
+                        self._vlog(f"OCO submit failed: symbol={symbol} error={rec['reason']}")
+                        failed += 1
+                        continue
                 rec["status"] = "SUBMITTED"
                 nq = out.get("normalized_quantity", None)
                 if nq is not None:
                     rec["quantity"] = float(nq)
+                try:
+                    eff_qty = float(out.get("normalized_quantity", qty) or qty)
+                    tp_eff = float(out.get("normalized_take_profit_price", tp_arg) or tp_arg or 0.0)
+                except Exception:
+                    eff_qty = float(qty)
+                    tp_eff = float(tp_arg or 0.0)
+                rec["quote_notional"] = self._format_notional_with_quote(eff_qty * tp_eff, symbol)
+                sf = self.bridge.get_binance_symbol_filters(symbol=symbol, profile_name=profile)
+                if sf.get("ok"):
+                    try:
+                        rec["min_notional"] = self._format_notional_with_quote(float(sf.get("min_notional", 0.0) or 0.0), symbol)
+                    except Exception:
+                        pass
                 rec["reason"] = (
                     str(rec.get("reason", "") or "")
                     + f" | OCO set TP @{float(out.get('normalized_take_profit_price', tp_arg) or tp_arg):.8f}"
@@ -4509,6 +4613,23 @@ class StrataGuiApp:
                 rec["quantity"] = float(nq)
             if npv is not None:
                 rec["reason"] = f"{rec.get('reason','')} | normalized px={npv}"
+            try:
+                qty_eff = float(out.get("normalized_quantity", qty) or qty)
+            except Exception:
+                qty_eff = float(qty)
+            ptmp = self.bridge.get_binance_last_price(symbol=symbol, profile_name=profile)
+            try:
+                ptmp_val = float(ptmp.get("price", 0.0) or 0.0) if ptmp.get("ok") else 0.0
+            except Exception:
+                ptmp_val = 0.0
+            if ptmp_val > 0:
+                rec["quote_notional"] = self._format_notional_with_quote(qty_eff * ptmp_val, symbol)
+            sf = self.bridge.get_binance_symbol_filters(symbol=symbol, profile_name=profile)
+            if sf.get("ok"):
+                try:
+                    rec["min_notional"] = self._format_notional_with_quote(float(sf.get("min_notional", 0.0) or 0.0), symbol)
+                except Exception:
+                    pass
             submitted += 1
             self._vlog(
                 f"Submit ok: symbol={symbol} side={side} normalized_qty={out.get('normalized_quantity')} normalized_px={out.get('normalized_price')}"
