@@ -3,7 +3,7 @@ import time
 import tkinter as tk
 from collections import deque
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
@@ -4983,15 +4983,28 @@ class StrataGuiApp:
 
         def worker():
             bridge = self._bridge_for_task()
+            def _progress(msg: str) -> None:
+                self.root.after(0, lambda m=msg: self._append_task_terminal(m))
             try:
-                res = self._compute_protection_recommendations(bridge, cfg)
+                res = self._compute_protection_recommendations(bridge, cfg, progress_cb=_progress)
             except Exception as exc:
                 res = {"ok": False, "error": f"{type(exc).__name__}: {exc}", "source": source}
             self.root.after(0, lambda: self._finish_protect_open_positions_ai(res, task_id))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _compute_protection_recommendations(self, bridge: EngineBridge, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    def _compute_protection_recommendations(
+        self,
+        bridge: EngineBridge,
+        cfg: Dict[str, Any],
+        progress_cb=None,
+    ) -> Dict[str, Any]:
+        def _progress(msg: str) -> None:
+            try:
+                if callable(progress_cb):
+                    progress_cb(msg)
+            except Exception:
+                pass
         profile = str(cfg.get("profile", "")).strip() or None
         out = bridge.get_trade_ledger()
         if not out.get("ok"):
@@ -5038,6 +5051,7 @@ class StrataGuiApp:
                     "pnl_pct": round(pnl_pct, 4),
                 }
             )
+            _progress(f"Protect AI+BT: backtesting {symbol} ({timeframe})...")
             try:
                 bt_cfg = dict(bt_opts)
                 bt_cfg.update(
@@ -5060,15 +5074,27 @@ class StrataGuiApp:
 
         prompt = self._build_protection_ai_prompt(pos_rows, bt_context)
         dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ai_res = bridge.run_ai_analysis(
-            dashboard_text=json.dumps({"positions": pos_rows}),
-            datetime_context=dt,
-            prompt_override=prompt,
-            system_prompt_override=(
-                "You are a strict JSON risk assistant. "
-                "Output only the protection plan JSON between required markers."
-            ),
-        )
+        _progress("Protect AI+BT: running AI protection planner...")
+        ai_timeout_sec = max(15, int(cfg.get("ai_timeout_sec", 90) or 90))
+        ai_holder: Dict[str, Any] = {}
+        def _ai_worker() -> None:
+            ai_holder["res"] = bridge.run_ai_analysis(
+                dashboard_text=json.dumps({"positions": pos_rows}),
+                datetime_context=dt,
+                prompt_override=prompt,
+                system_prompt_override=(
+                    "You are a strict JSON risk assistant. "
+                    "Output only the protection plan JSON between required markers."
+                ),
+            )
+        t = threading.Thread(target=_ai_worker, daemon=True)
+        t.start()
+        t.join(timeout=ai_timeout_sec)
+        if t.is_alive():
+            _progress(f"Protect AI+BT: AI timed out after {ai_timeout_sec}s, using fallback protection.")
+            ai_res = {"ok": False, "response": "", "error": f"timeout>{ai_timeout_sec}s"}
+        else:
+            ai_res = ai_holder.get("res", {"ok": False, "response": "", "error": "AI worker returned no result"})
         plans = self._extract_protection_plan_from_ai_text(ai_res.get("response", "")) if ai_res.get("ok") else []
         if not plans:
             fallback_stop = float(bt_opts.get("stop_loss_pct", 8.0) or 8.0)
@@ -5208,6 +5234,29 @@ class StrataGuiApp:
                 messagebox.showinfo("Protection", note)
             self._finish_task(task_id, task_name="Protect Open Positions")
             return
+        incoming_symbols = {
+            str(r.get("symbol", "")).strip().upper()
+            for r in staged_recs
+            if isinstance(r, dict) and str(r.get("symbol", "")).strip()
+        }
+        removed_old = 0
+        if incoming_symbols:
+            kept: List[Dict[str, Any]] = []
+            for rec in self.pending_recommendations:
+                try:
+                    sym = str(rec.get("symbol", "")).strip().upper()
+                except Exception:
+                    sym = ""
+                # Only replace prior protection recommendations for the same symbol.
+                is_prior_protection = bool(
+                    str(rec.get("pending_source", "")).strip().lower() == "protect_open_positions_ai_bt"
+                    or str(rec.get("protection_mode", "")).strip()
+                )
+                if sym in incoming_symbols and is_prior_protection:
+                    removed_old += 1
+                    continue
+                kept.append(rec)
+            self.pending_recommendations = kept
         new_ids: List[int] = []
         for r in staged_recs:
             if not isinstance(r, dict):
@@ -5215,11 +5264,13 @@ class StrataGuiApp:
             self._pending_rec_seq += 1
             rr = dict(r)
             rr["id"] = self._pending_rec_seq
+            rr["pending_source"] = "protect_open_positions_ai_bt"
+            rr["staged_ts"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             self.pending_recommendations.append(rr)
             new_ids.append(int(self._pending_rec_seq))
         self._refresh_pending_recommendations_view()
         self._append_task_terminal(
-            f"DONE Protect Open Positions ({source}) -> staged={len(new_ids)}, positions={int(res.get('positions', 0) or 0)}, ai_ok={bool(res.get('ai_ok'))}, bt_ctx={int(res.get('bt_ctx', 0) or 0)}"
+            f"DONE Protect Open Positions ({source}) -> staged={len(new_ids)}, replaced={removed_old}, positions={int(res.get('positions', 0) or 0)}, ai_ok={bool(res.get('ai_ok'))}, bt_ctx={int(res.get('bt_ctx', 0) or 0)}"
         )
         if bool(res.get("auto_submit", False)) and new_ids:
             self._submit_selected_pending_orders(ids_override=new_ids, require_confirm=False)
