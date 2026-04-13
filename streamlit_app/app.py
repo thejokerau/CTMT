@@ -13,6 +13,8 @@ from gui_app.engine_bridge import EngineBridge
 # Streamlit + numba/pandas_ta safety for dynamic-loader contexts.
 os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
 os.environ.setdefault("NUMBA_CACHE_DIR", str(Path.home() / ".numba_cache"))
+os.environ.setdefault("NO_PROXY", "api.binance.com,localhost,127.0.0.1")
+os.environ.setdefault("no_proxy", os.environ.get("NO_PROXY", "api.binance.com,localhost,127.0.0.1"))
 
 
 st.set_page_config(page_title="STRATA Streamlit", layout="wide")

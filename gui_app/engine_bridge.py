@@ -766,17 +766,32 @@ class EngineBridge:
         sig = hmac.new(api_secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
         url = endpoint.rstrip("/") + path + "?" + query + "&signature=" + sig
         headers = {"X-MBX-APIKEY": api_key}
-        try:
+
+        def _do_req(disable_proxy: bool = False):
             m = method.strip().upper()
+            kwargs: Dict[str, Any] = {"headers": headers, "timeout": 30}
+            if disable_proxy:
+                kwargs["proxies"] = {"http": None, "https": None}
             if m == "POST":
-                r = requests.post(url, headers=headers, timeout=30)
-            elif m == "DELETE":
-                r = requests.delete(url, headers=headers, timeout=30)
-            else:
-                r = requests.get(url, headers=headers, timeout=30)
+                return requests.post(url, **kwargs)
+            if m == "DELETE":
+                return requests.delete(url, **kwargs)
+            return requests.get(url, **kwargs)
+
+        try:
+            r = _do_req(disable_proxy=False)
             if not (200 <= r.status_code < 300):
                 return {"ok": False, "status": r.status_code, "error": (r.text or "")[:1200]}
             return {"ok": True, "status": r.status_code, "data": r.json()}
+        except requests.exceptions.ProxyError:
+            # Retry once with proxies disabled to handle bad local proxy defaults.
+            try:
+                r = _do_req(disable_proxy=True)
+                if not (200 <= r.status_code < 300):
+                    return {"ok": False, "status": r.status_code, "error": (r.text or "")[:1200]}
+                return {"ok": True, "status": r.status_code, "data": r.json()}
+            except Exception as e2:
+                return {"ok": False, "status": -1, "error": str(e2)}
         except Exception as e:
             return {"ok": False, "status": -1, "error": str(e)}
 
