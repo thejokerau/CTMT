@@ -108,6 +108,15 @@ This launches an experimental web UI at `http://localhost:8501` with tabs for:
 - Task Monitor
 - Settings
 
+Local runtime artifacts (not committed):
+
+- Streamlit/Grok/live snapshot outputs and generated reports are ignored by git.
+- Dashboard profile presets are user-local and may be stored in:
+  - `%USERPROFILE%\\.ctmt\\gui\\streamlit_live_profiles.json` (preferred),
+  - `%LOCALAPPDATA%\\CTMT\\gui\\streamlit_live_profiles.json` (fallback),
+  - local temp/repo fallback paths when required.
+- Runtime smoke/debug logs (`*.log`) are ignored.
+
 GUI task execution:
 
 - Default mode runs one active task at a time (additional tasks are queued).

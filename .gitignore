@@ -8,6 +8,7 @@
 **/experiments/live_snapshots/
 **/experiments/backtest_snapshots/
 **/experiments/grok/
+**/experiments/streamlit/
 .ctmt/
 
 # Explicit generated JSON artifact ignores (defensive)
@@ -20,3 +21,6 @@
 # Python build/runtime artifacts
 **/__pycache__/
 *.pyc
+
+# Runtime logs
+*.log

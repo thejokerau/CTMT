@@ -238,6 +238,14 @@ Reconcile/placeholder behavior:
 - Runtime artifacts and secrets excluded from git.
 - Exchange actions only through explicit mode/guardrail gates.
 
+Local-only artifact policy:
+
+- Streamlit live dashboard profiles are written to user-local storage with fallbacks:
+  - `%USERPROFILE%\\.ctmt\\gui\\streamlit_live_profiles.json` (preferred),
+  - `%LOCALAPPDATA%\\CTMT\\gui\\streamlit_live_profiles.json`,
+  - temp/repo fallback only when required by filesystem permissions.
+- Experiment outputs (`experiments/*` runtime folders), live snapshots, Grok prompts, and runtime logs are treated as generated artifacts and ignored by git.
+
 ## 11. Extension Points
 
 - Native trailing-stop order support per exchange capability.

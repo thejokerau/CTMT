@@ -112,6 +112,7 @@ Visual:
   - task monitor + terminal logs + explicit status.
 - Security:
   - API keys in user-local secure files/env, excluded from git.
+  - runtime artifacts (snapshots, prompts, logs, streamlit profile presets) remain local and excluded from git.
 
 ## 10. Current Evolution Focus
 
