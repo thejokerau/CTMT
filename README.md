@@ -125,10 +125,24 @@ GUI task execution:
 - `Task Monitor` tab supports:
   - auto-refresh (~1s) for running/queued state
   - live running/queued visibility
+  - exact per-job state (`RUNNING/DONE/FAILED`) with elapsed seconds
+  - per-job verbose stdout/stderr capture while long tasks execute
   - pause/resume queue
   - remove queued task
   - queued task reprioritization (move up/down)
   - terminal-style live log pane for task start/completion and captured backend output
+
+Live freshness behavior (Streamlit):
+
+- Global portfolio prefetch heartbeat keeps shared `Portfolio/Open Orders/Ledger` cache warm on cadence (see `Settings -> Data Prefetch`).
+- `Position Graph` auto-refresh defaults to ON and refreshes portfolio cache before rebuilding graph rows.
+- Portfolio tab and graph tab now show last refresh timestamps for quick confidence checks.
+
+Background concurrency (Streamlit):
+
+- Async jobs run on a shared background worker pool.
+- Default worker count is `4` (override with env `CTMT_STREAMLIT_BG_WORKERS`).
+- You can change worker count live in `Settings -> Concurrency -> Background workers`.
 
 Live Dashboard preset management:
 
@@ -138,6 +152,12 @@ Live Dashboard preset management:
   - save/update profile from all current panels
   - load single profile (replace current panels)
   - merge multiple selected profiles (append)
+  - primary timeframe + extra timeframes in one run
+  - measurement window controls:
+    - `full` (all history),
+    - `days` (for example `7` days on `4h`),
+    - `bars` (fixed candle count per timeframe)
+  - saved profiles persist these timeframe/window settings and downstream workflows reuse them (`Live -> BT -> AI` and protection runs).
   - delete multiple selected profiles
 
 GUI dashboard readability:
@@ -220,6 +240,11 @@ GUI Portfolio & Ledger:
 
 - New `Portfolio & Ledger` tab:
   - Binance account portfolio snapshot (balances + estimated USD value)
+  - FIFO open-to-close PnL tracker:
+    - matches SELL executions against prior BUY lots using FIFO
+    - closed journal table (entry -> exit, hold time, PnL quote, PnL %)
+    - open-lot table with mark-to-market unrealized PnL
+    - CSV export for both views
   - `Reconcile Fills` action to backfill missing execution rows/open positions from Binance trade history
   - `Protect Open Positions (AI+BT)` action:
     - analyzes current open positions

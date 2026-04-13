@@ -238,6 +238,9 @@ class EngineBridge:
                 "country": str(cfg.get("country", "2")),
                 "display_currency": str(cfg.get("display_currency", "USD")).upper(),
                 "name": str(cfg.get("name", "")),
+                "analysis_window_mode": str(cfg.get("analysis_window_mode", "full")).lower(),
+                "analysis_window_days": int(cfg.get("analysis_window_days", 0) or 0),
+                "analysis_window_bars": int(cfg.get("analysis_window_bars", 0) or 0),
             },
         )
         cached = self._cache_get(self._result_cache, ck, self._cache_ttl_live_sec)
@@ -286,6 +289,9 @@ class EngineBridge:
         enriched, perf_ind = self._load_indicator_cache(raw_data, timeframe, workers=indicator_workers)
         if not enriched:
             return {"ok": False, "error": "No indicator-ready data."}
+        enriched, window_meta = self._apply_live_analysis_window(enriched, timeframe, cfg)
+        if not enriched:
+            return {"ok": False, "error": "No data left after applying analysis window."}
 
         t_table = self._now()
         table, risk = self.mod.build_live_tables(enriched, is_crypto, tuned, timeframe)
@@ -311,12 +317,42 @@ class EngineBridge:
             "requested_assets": len(tickers),
             "timeframe": timeframe,
             "market": "Crypto" if is_crypto else "Traditional",
+            "analysis_window": window_meta,
             "perf": {
                 **perf_raw,
                 **perf_ind,
                 "table_sec": table_sec,
             },
         }
+
+    def _apply_live_analysis_window(self, enriched: Dict[str, pd.DataFrame], timeframe: str, cfg: Dict[str, Any]) -> Tuple[Dict[str, pd.DataFrame], Dict[str, Any]]:
+        mode = str(cfg.get("analysis_window_mode", "full") or "full").strip().lower()
+        days = int(cfg.get("analysis_window_days", 0) or 0)
+        bars = int(cfg.get("analysis_window_bars", 0) or 0)
+        if mode not in ("full", "days", "bars"):
+            mode = "full"
+        if mode == "full":
+            return enriched, {"mode": "full", "bars": None, "days": None}
+
+        bars_per_day = {"4h": 6, "8h": 3, "12h": 2, "1d": 1}
+        target_bars = 0
+        if mode == "bars":
+            target_bars = max(0, bars)
+        elif mode == "days":
+            bpd = int(bars_per_day.get(str(timeframe).lower(), 1))
+            target_bars = max(0, days * bpd)
+        if target_bars <= 0:
+            return enriched, {"mode": "full", "bars": None, "days": None}
+
+        trimmed: Dict[str, pd.DataFrame] = {}
+        for ticker, df in enriched.items():
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                continue
+            tdf = df.tail(target_bars).copy()
+            if tdf.empty:
+                continue
+            trimmed[ticker] = tdf
+        return trimmed, {"mode": mode, "bars": int(target_bars), "days": int(days) if mode == "days" else None}
 
     def run_backtest(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         ck = self._stable_cache_key(
