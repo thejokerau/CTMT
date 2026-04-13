@@ -867,7 +867,7 @@ with tab_settings:
     ai_pick = _safe_select_option("Select AI profile", ai_names, preferred=ai_active)
     s1, s2 = st.columns(2)
     ai_test = s1.button("Test Selected AI Profile", disabled=not bool(ai_pick))
-    ai_set = s2.button("Set Selected as Active", disabled=not bool(ai_pick))
+    ai_set = s2.button("Set Selected as Active", key="ai_set_active_btn", disabled=not bool(ai_pick))
     if ai_test and ai_pick:
         out = _run_task("AI Profile Test", lambda: bridge.test_ai_profile(ai_pick))
         if out.get("ok"):
@@ -886,7 +886,7 @@ with tab_settings:
     bn_pick = _safe_select_option("Select Binance profile", bn_names, preferred=(bn_names[0] if bn_names else ""))
     b1, b2 = st.columns(2)
     bn_test = b1.button("Test Selected Binance Profile", disabled=not bool(bn_pick))
-    bn_set = b2.button("Set Selected as Active", disabled=not bool(bn_pick))
+    bn_set = b2.button("Set Selected as Active", key="binance_set_active_btn", disabled=not bool(bn_pick))
     if bn_test and bn_pick:
         out = _run_task("Binance Profile Test", lambda: bridge.test_binance_profile(bn_pick))
         if out.get("ok"):
