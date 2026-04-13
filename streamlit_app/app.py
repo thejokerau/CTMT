@@ -1,9 +1,12 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime
 import os
+import json
+import re
+import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -31,6 +34,165 @@ REPO_ROOT = str(Path(__file__).resolve().parents[1])
 bridge = get_bridge(REPO_ROOT)
 
 
+def _init_state() -> None:
+    defaults = {
+        "task_logs": [],
+        "task_history": [],
+        "pending_recs": [],
+        "pending_rec_seq": 0,
+        "ai_source_text": "",
+        "ai_response": "",
+        "ai_prompt_preview": "",
+        "last_live_text": "",
+        "selected_pending_ids": [],
+        "live_runs": [],
+        "last_backtest_summary": "",
+        "last_backtest_trades": "",
+        "last_portfolio_df": pd.DataFrame(),
+        "last_open_orders_df": pd.DataFrame(),
+        "last_ledger_df": pd.DataFrame(),
+        "last_review_df": pd.DataFrame(),
+        "last_graph_df": pd.DataFrame(),
+        "last_research_text": "",
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def _log(msg: str) -> None:
+    line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+    st.session_state.task_logs.append(line)
+    st.session_state.task_logs = st.session_state.task_logs[-600:]
+
+
+def _run_task(name: str, fn):
+    t0 = time.time()
+    _log(f"START {name}")
+    try:
+        out = fn()
+        dt = time.time() - t0
+        st.session_state.task_history.append({"task": name, "sec": round(dt, 3), "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "ok": True})
+        st.session_state.task_history = st.session_state.task_history[-300:]
+        _log(f"DONE {name} ({dt:.2f}s)")
+        return out
+    except Exception as exc:
+        dt = time.time() - t0
+        st.session_state.task_history.append({"task": name, "sec": round(dt, 3), "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "ok": False})
+        st.session_state.task_history = st.session_state.task_history[-300:]
+        _log(f"DONE {name} (error: {type(exc).__name__}: {exc})")
+        raise
+
+
+def _extract_json_block(text: str, begin: str, end: str) -> Optional[Dict[str, Any]]:
+    src = str(text or "")
+    pat = re.escape(begin) + r"\s*(\{[\s\S]*?\})\s*" + re.escape(end)
+    m = re.search(pat, src, flags=re.IGNORECASE)
+    blob = m.group(1).strip() if m else ""
+    if not blob:
+        m2 = re.search(r"(\{[\s\S]*\})", src)
+        blob = m2.group(1).strip() if m2 else ""
+    if not blob:
+        return None
+    try:
+        obj = json.loads(blob)
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _extract_trade_recs(ai_text: str, default_tf: str = "4h") -> List[Dict[str, Any]]:
+    obj = _extract_json_block(ai_text, "BEGIN_STRATA_TRADE_PLAN_JSON", "END_STRATA_TRADE_PLAN_JSON")
+    recs: List[Dict[str, Any]] = []
+    if isinstance(obj, dict):
+        arr = obj.get("trades", [])
+        if isinstance(arr, list):
+            for t in arr:
+                if not isinstance(t, dict):
+                    continue
+                side = str(t.get("side", "")).strip().upper()
+                sym = str(t.get("symbol", "")).strip().upper()
+                if side not in ("BUY", "SELL") or not sym:
+                    continue
+                recs.append(
+                    {
+                        "symbol": sym,
+                        "asset": re.sub(r"(USDT|USDC|BUSD|FDUSD|USD|BTC|ETH|BNB)$", "", sym),
+                        "side": side,
+                        "order_type": str(t.get("order_type", "MARKET") or "MARKET").upper(),
+                        "quantity": float(t.get("quantity", 0.0) or 0.0),
+                        "quote_notional": float(t.get("quote_notional", 0.0) or 0.0),
+                        "stop_loss_price": float(t.get("stop_loss_price", 0.0) or 0.0),
+                        "take_profit_price": float(t.get("take_profit_price", 0.0) or 0.0),
+                        "limit_price": float(t.get("limit_price", 0.0) or 0.0),
+                        "take_profit_limit_price": float(t.get("take_profit_limit_price", 0.0) or 0.0),
+                        "timeframe": str(t.get("timeframe", default_tf) or default_tf),
+                        "confidence": int(float(t.get("confidence", 70) or 70)),
+                        "status": "PENDING",
+                        "reason": str(t.get("reason", "AI structured recommendation") or "AI structured recommendation"),
+                    }
+                )
+    return recs
+
+
+def _append_pending(recs: List[Dict[str, Any]], source: str = "ai_interpretation") -> int:
+    n = 0
+    for r in recs:
+        if not isinstance(r, dict):
+            continue
+        st.session_state.pending_rec_seq += 1
+        rr = dict(r)
+        rr["id"] = int(st.session_state.pending_rec_seq)
+        rr["pending_source"] = source
+        st.session_state.pending_recs.append(rr)
+        n += 1
+    return n
+
+
+def _pending_df() -> pd.DataFrame:
+    rows = st.session_state.pending_recs if isinstance(st.session_state.pending_recs, list) else []
+    if not rows:
+        return pd.DataFrame(columns=["id", "symbol", "side", "order_type", "quantity", "quote_notional", "stop_loss_price", "take_profit_price", "timeframe", "confidence", "status", "reason"])
+    return pd.DataFrame(rows)
+
+
+def _submit_pending_rec(profile: str, rec: Dict[str, Any]) -> Dict[str, Any]:
+    sym = str(rec.get("symbol", "")).strip().upper()
+    side = str(rec.get("side", "BUY")).strip().upper()
+    typ = str(rec.get("order_type", "MARKET")).strip().upper()
+    qty = float(rec.get("quantity", 0.0) or 0.0)
+    q_notional = float(rec.get("quote_notional", 0.0) or 0.0)
+    sl = float(rec.get("stop_loss_price", 0.0) or 0.0)
+    tp = float(rec.get("take_profit_price", 0.0) or 0.0)
+    lp = float(rec.get("limit_price", 0.0) or 0.0)
+    tp_lp = float(rec.get("take_profit_limit_price", 0.0) or 0.0)
+
+    if typ == "OCO_BRACKET":
+        if side != "SELL":
+            return {"ok": False, "error": "OCO_BRACKET is SELL-only."}
+        if qty <= 0 or sl <= 0 or tp <= 0:
+            return {"ok": False, "error": "OCO_BRACKET requires qty, stop_loss and take_profit > 0."}
+        return bridge.submit_binance_oco_sell(
+            symbol=sym,
+            quantity=qty,
+            take_profit_price=tp,
+            stop_price=sl,
+            stop_limit_price=(lp if lp > 0 else sl * 0.999),
+            take_profit_limit_price=(tp_lp if tp_lp > 0 else tp * 0.999),
+            profile_name=profile,
+        )
+    return bridge.submit_binance_order(
+        symbol=sym,
+        side=side,
+        order_type=typ,
+        quantity=qty,
+        quote_order_qty=q_notional,
+        stop_loss_price=sl,
+        limit_price=lp,
+        profile_name=profile,
+    )
+
+
 def _load_binance_profiles() -> List[str]:
     out = bridge.list_binance_profiles()
     if not out.get("ok"):
@@ -38,6 +200,23 @@ def _load_binance_profiles() -> List[str]:
     profiles = out.get("profiles", []) or []
     names = [str(p.get("name", "")).strip() for p in profiles if isinstance(p, dict) and str(p.get("name", "")).strip()]
     return sorted(names)
+
+
+def _load_ai_profiles() -> Tuple[List[str], str]:
+    out = bridge.list_ai_profiles()
+    if not out.get("ok"):
+        return [], ""
+    profiles = out.get("profiles", []) or []
+    names = [str(p.get("name", "")).strip() for p in profiles if isinstance(p, dict) and str(p.get("name", "")).strip()]
+    return sorted(names), str(out.get("active_profile", "") or "")
+
+
+def _safe_select_option(label: str, options: List[str], preferred: str = "") -> Optional[str]:
+    if not options:
+        st.selectbox(label, ["(none)"], index=0, disabled=True)
+        return None
+    idx = options.index(preferred) if preferred in options else 0
+    return st.selectbox(label, options, index=idx)
 
 
 def _confirmed_execution_rows(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -247,38 +426,124 @@ def _position_graph_rows(profile: str, quote_pref: str = "USDT") -> pd.DataFrame
     return df
 
 
-tab_live, tab_backtest, tab_ai, tab_portfolio, tab_graph = st.tabs(
-    ["Live Dashboard", "Backtest", "AI Analysis", "Portfolio & Orders", "Position Graph"]
+def _protect_open_positions_simple(profile: str, auto_submit: bool = False) -> Dict[str, Any]:
+    out = bridge.analyze_open_positions_multi_tf(
+        profile_name=profile,
+        timeframes=["4h", "8h", "12h", "1d"],
+        display_currency="USD",
+    )
+    if not out.get("ok"):
+        return {"ok": False, "error": str(out.get("error", "Open position analysis failed"))}
+    rows = out.get("rows", []) if isinstance(out.get("rows"), list) else []
+    staged: List[Dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        symbol = str(r.get("symbol", "")).strip().upper()
+        if not symbol:
+            continue
+        try:
+            qty = float(r.get("qty", 0.0) or 0.0)
+            price = float(r.get("last_price", 0.0) or 0.0)
+        except Exception:
+            qty, price = 0.0, 0.0
+        if qty <= 0 or price <= 0:
+            continue
+        stop = price * 0.92
+        tp = price * 1.12
+        staged.append(
+            {
+                "symbol": symbol,
+                "asset": re.sub(r"(USDT|USDC|BUSD|FDUSD|USD|BTC|ETH|BNB)$", "", symbol),
+                "side": "SELL",
+                "order_type": "OCO_BRACKET",
+                "quantity": qty,
+                "stop_loss_price": stop,
+                "take_profit_price": tp,
+                "limit_price": stop * 0.999,
+                "take_profit_limit_price": tp * 0.999,
+                "timeframe": str(r.get("timeframe", "spot") or "spot"),
+                "confidence": int(float(r.get("confidence", 70) or 70)),
+                "status": "PENDING",
+                "reason": "Auto protection from open-position MTF review",
+            }
+        )
+    # Replace older protection recommendations for same symbols.
+    incoming = {str(x.get("symbol", "")).upper() for x in staged if isinstance(x, dict)}
+    if incoming:
+        kept = []
+        for rec in st.session_state.pending_recs:
+            sym = str(rec.get("symbol", "")).strip().upper() if isinstance(rec, dict) else ""
+            src = str(rec.get("pending_source", "")).strip().lower() if isinstance(rec, dict) else ""
+            if sym in incoming and src == "protect_open_positions_ai_bt":
+                continue
+            kept.append(rec)
+        st.session_state.pending_recs = kept
+    added = _append_pending(staged, source="protect_open_positions_ai_bt")
+    submitted = 0
+    if auto_submit and added > 0:
+        for rec in st.session_state.pending_recs:
+            if not isinstance(rec, dict):
+                continue
+            if str(rec.get("pending_source", "")).strip().lower() != "protect_open_positions_ai_bt":
+                continue
+            out_sub = _submit_pending_rec(profile, rec)
+            rec["status"] = "SUBMITTED" if out_sub.get("ok") else "FAILED"
+            rec["reason"] = str(rec.get("reason", "")) + (" | submitted" if out_sub.get("ok") else f" | {out_sub.get('error', 'submit failed')}")
+            if out_sub.get("ok"):
+                submitted += 1
+    return {"ok": True, "staged": added, "submitted": submitted, "rows": len(rows)}
+
+
+_init_state()
+
+tab_live, tab_backtest, tab_ai, tab_portfolio, tab_graph, tab_research, tab_tasks, tab_settings = st.tabs(
+    ["Live Dashboard", "Backtest", "AI Analysis", "Portfolio & Ledger", "Position Graph", "Auto-Research", "Task Monitor", "Settings"]
 )
 
 with tab_live:
     st.subheader("Live Dashboard")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    market = c1.selectbox("Market", ["crypto", "traditional"], index=0)
-    timeframe = c2.selectbox("Timeframe", ["1d", "4h", "8h", "12h"], index=0)
-    top_n = c3.selectbox("Top N", [10, 20, 50, 100], index=1)
-    quote = c4.selectbox("Quote", ["USDT", "USD", "BTC", "ETH", "BNB"], index=0)
-    country = c5.selectbox("Country (traditional)", ["1", "2", "3", "4", "5", "6"], index=1)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    market = c1.selectbox("Market", ["crypto", "traditional"], index=0, key="live_market")
+    timeframe = c2.selectbox("Timeframe", ["1d", "4h", "8h", "12h"], index=0, key="live_tf")
+    tf_multi = c3.multiselect("Extra TFs", ["1d", "4h", "8h", "12h"], default=[], key="live_tf_multi")
+    top_n = c4.selectbox("Top N", [10, 20, 50, 100], index=1, key="live_topn")
+    quote = c5.selectbox("Quote", ["USDT", "USD", "BTC", "ETH", "BNB"], index=0, key="live_quote")
+    country = c6.selectbox("Country (traditional)", ["1", "2", "3", "4", "5", "6"], index=1, key="live_country")
     if st.button("Run Live Dashboard", type="primary"):
-        cfg = {
-            "name": f"{market}-{timeframe}",
-            "market": market,
-            "timeframe": timeframe,
-            "quote_currency": quote,
-            "top_n": int(top_n),
-            "country": country,
-            "display_currency": "USD",
-        }
-        with st.spinner("Running live panel..."):
-            res = bridge.run_live_panel(cfg)
-        if not res.get("ok"):
-            st.error(res.get("error", "Live run failed"))
-        else:
-            st.success("Live run complete")
-            st.text(res.get("table_text", ""))
-            st.text(res.get("breakdown_text", ""))
-            if res.get("context_text"):
-                st.text(res.get("context_text", ""))
+        run_tfs = [timeframe] + [x for x in tf_multi if x != timeframe]
+        combined: List[str] = []
+        for tf in run_tfs:
+            cfg = {
+                "name": f"{market}-{tf}",
+                "market": market,
+                "timeframe": tf,
+                "quote_currency": quote,
+                "top_n": int(top_n),
+                "country": country,
+                "display_currency": "USD",
+            }
+            with st.spinner(f"Running live panel ({tf})..."):
+                res = _run_task(f"Live Dashboard {tf}", lambda ccfg=cfg: bridge.run_live_panel(ccfg))
+            if not res.get("ok"):
+                st.error(f"{tf}: {res.get('error', 'Live run failed')}")
+                continue
+            t = res.get("table_text", "")
+            b = res.get("breakdown_text", "")
+            c = res.get("context_text", "")
+            block = "\n\n".join([str(t), str(b), str(c)]).strip()
+            st.session_state.live_runs.append({"name": f"{market}-{tf}", "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "text": block})
+            st.session_state.live_runs = st.session_state.live_runs[-20:]
+            combined.append(block)
+        if combined:
+            st.session_state.last_live_text = "\n\n".join(combined).strip()
+            st.success(f"Live run complete ({len(combined)} panel(s)).")
+    if st.session_state.live_runs:
+        st.markdown("### Latest Live Outputs")
+        for run in reversed(st.session_state.live_runs[-6:]):
+            lbl = f"{run.get('ts', '')} | {run.get('name', '')}"
+            with st.expander(lbl, expanded=False):
+                st.text(str(run.get("text", "")))
 
 with tab_backtest:
     st.subheader("Backtest")
@@ -287,6 +552,19 @@ with tab_backtest:
     timeframe = c2.selectbox("Timeframe", ["1d", "4h", "8h", "12h"], index=0, key="bt_tf")
     top_n = c3.selectbox("Top N", [10, 20, 50, 100], index=1, key="bt_topn")
     months = c4.selectbox("Lookback (months)", [1, 3, 6, 12, 18, 24], index=3, key="bt_months")
+    bt_cols = st.columns(6)
+    stop_loss_pct = bt_cols[0].number_input("Stop-loss %", value=8.0, min_value=0.5, max_value=50.0, step=0.5)
+    take_profit_pct = bt_cols[1].number_input("Take-profit %", value=20.0, min_value=1.0, max_value=200.0, step=1.0)
+    max_hold_days = bt_cols[2].number_input("Max hold days", value=45, min_value=1, max_value=365, step=1)
+    pos_size_pct = bt_cols[3].number_input("Position size %", value=30.0, min_value=1.0, max_value=100.0, step=1.0)
+    auto_tune = bt_cols[4].checkbox("Auto-tune", value=False)
+    optuna_trials = bt_cols[5].number_input("Optuna trials", value=10, min_value=1, max_value=300, step=1)
+    bt2 = st.columns(5)
+    fee_pct = bt2[0].number_input("Fee % (per leg)", value=0.10, min_value=0.0, max_value=5.0, step=0.01)
+    slip_pct = bt2[1].number_input("Slippage % (per leg)", value=0.05, min_value=0.0, max_value=5.0, step=0.01)
+    min_hold_bars = int(bt2[2].number_input("Min hold bars", value=2, min_value=0, max_value=100, step=1))
+    cooldown_bars = int(bt2[3].number_input("Cooldown bars", value=1, min_value=0, max_value=100, step=1))
+    cache_workers = int(bt2[4].number_input("Indicator cache workers", value=4, min_value=1, max_value=64, step=1))
     if st.button("Run Backtest", type="primary"):
         cfg = {
             "market": market,
@@ -297,88 +575,134 @@ with tab_backtest:
             "quote_currency": "USDT",
             "display_currency": "USD",
             "initial_capital": 10000.0,
-            "stop_loss_pct": 8.0,
-            "take_profit_pct": 20.0,
-            "max_hold_days": 45,
+            "stop_loss_pct": float(stop_loss_pct),
+            "take_profit_pct": float(take_profit_pct),
+            "max_hold_days": int(max_hold_days),
             "min_hold_bars": 2,
             "cooldown_bars": 1,
             "same_asset_cooldown_bars": 3,
             "max_consecutive_same_asset_entries": 3,
-            "fee_pct": 0.1,
-            "slippage_pct": 0.05,
-            "position_size": 0.3,
+            "fee_pct": float(fee_pct),
+            "slippage_pct": float(slip_pct),
+            "position_size": max(0.01, min(1.0, float(pos_size_pct) / 100.0)),
             "atr_multiplier": 2.2,
             "adx_threshold": 25.0,
             "cmf_threshold": 0.02,
             "obv_slope_threshold": 0.0,
             "buy_threshold": 2,
             "sell_threshold": -2,
-            "cache_workers": 4,
+            "cache_workers": int(cache_workers),
             "max_drawdown_limit_pct": 35.0,
             "max_exposure_pct": 0.4,
-            "auto_tune": False,
-            "optuna_trials": 10,
+            "auto_tune": bool(auto_tune),
+            "optuna_trials": int(optuna_trials),
             "optuna_jobs": 2,
         }
         with st.spinner("Running backtest..."):
-            res = bridge.run_backtest(cfg)
+            res = _run_task("Backtest", lambda: bridge.run_backtest(cfg))
         if not res.get("ok"):
             st.error(res.get("error", "Backtest failed"))
         else:
             st.success("Backtest complete")
-            st.text(res.get("summary_text", ""))
-            st.text(res.get("trade_text", ""))
+            st.session_state.last_backtest_summary = str(res.get("summary_text", "") or "")
+            st.session_state.last_backtest_trades = str(res.get("trade_text", "") or "")
+    if st.session_state.last_backtest_summary:
+        st.text(st.session_state.last_backtest_summary)
+    if st.session_state.last_backtest_trades:
+        st.text(st.session_state.last_backtest_trades)
 
 with tab_ai:
     st.subheader("AI Analysis")
+    ai_names, ai_active = _load_ai_profiles()
+    ai_cols = st.columns([2, 1, 1, 1])
+    ai_profile = _safe_select_option("AI profile", ai_names, preferred=ai_active)
+    if ai_cols[1].button("Set Active") and ai_profile:
+        out_set = _run_task("AI Set Active", lambda: bridge.set_active_ai_profile(ai_profile))
+        if out_set.get("ok"):
+            st.success("AI profile set active.")
+        else:
+            st.error(out_set.get("error", "Failed to set active AI profile"))
+    if ai_cols[2].button("Preview Prompt"):
+        st.session_state.ai_prompt_preview = bridge.build_dashboard_prompt(st.session_state.ai_source_text or "", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    if ai_cols[3].button("Stage Recs"):
+        recs = _extract_trade_recs(st.session_state.ai_response or "", default_tf="4h")
+        if recs:
+            n = _append_pending(recs, source="ai_interpretation")
+            _log(f"AI staged {n} recommendation(s).")
+            st.success(f"Staged {n} recommendation(s).")
+        else:
+            st.warning("No structured trade recommendations found.")
     dt_context = st.text_input("Datetime context", value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    src = st.text_area("Source text (dashboard/backtest/logs)", height=280, placeholder="Paste dashboard text here...")
+    src_mode = st.selectbox("Source mode", ["manual", "last_live"], index=0)
+    src_default = st.session_state.last_live_text if src_mode == "last_live" else st.session_state.ai_source_text
+    src = st.text_area("Source text (dashboard/backtest/logs)", value=src_default, height=280, placeholder="Paste dashboard text here...")
+    st.session_state.ai_source_text = src
+    if st.session_state.ai_prompt_preview:
+        st.text_area("Prompt Preview", value=st.session_state.ai_prompt_preview, height=200)
     if st.button("Run AI Analysis", type="primary"):
         if not src.strip():
             st.warning("Provide source text first.")
         else:
             with st.spinner("Calling AI provider..."):
-                res = bridge.run_ai_analysis(src, dt_context)
+                res = _run_task("AI Analysis", lambda: bridge.run_ai_analysis(src, dt_context))
             if not res.get("ok"):
                 st.error(res.get("error", "AI failed"))
             else:
+                st.session_state.ai_response = str(res.get("response", "") or "")
                 st.success("AI response received")
-                st.text_area("AI Response", value=res.get("response", ""), height=420)
+    if st.session_state.ai_response:
+        st.text_area("AI Response", value=st.session_state.ai_response, height=420)
+    follow = st.text_input("Follow-up")
+    if st.button("Run Follow-up") and follow.strip():
+        compound = (st.session_state.ai_source_text or "") + "\n\nPrevious response:\n" + (st.session_state.ai_response or "") + "\n\nFollow-up:\n" + follow
+        out_fu = _run_task("AI Follow-up", lambda: bridge.run_ai_analysis(compound, dt_context))
+        if out_fu.get("ok"):
+            st.session_state.ai_response = str(out_fu.get("response", "") or "")
+        else:
+            st.error(out_fu.get("error", "Follow-up failed"))
 
 with tab_portfolio:
-    st.subheader("Portfolio & Open Orders")
+    st.subheader("Portfolio & Ledger")
     names = _load_binance_profiles()
-    profile = st.selectbox("Binance profile", names, index=0 if names else None)
-    c1, c2, c3 = st.columns(3)
+    profile = _safe_select_option("Binance profile", names, preferred=(names[0] if names else ""))
+    c1, c2, c3, c4, c5 = st.columns(5)
     do_pf = c1.button("Refresh Portfolio", type="primary", disabled=not bool(profile))
     do_oo = c2.button("Refresh Open Orders", disabled=not bool(profile))
-    do_led = c3.button("Refresh Ledger", disabled=not bool(profile))
+    do_led = c3.button("Refresh Ledger")
+    do_rec = c4.button("Reconcile Fills", disabled=not bool(profile))
+    do_review = c5.button("Review Open Positions (MTF)", disabled=not bool(profile))
+    pcols = st.columns(3)
+    auto_send_protect = pcols[0].checkbox("Auto-send protect", value=False)
+    do_protect = pcols[1].button("Protect Open Positions (AI+BT)", disabled=not bool(profile))
+    do_prune = pcols[2].button("Prune Signal History")
 
     if do_pf and profile:
-        out = bridge.fetch_binance_portfolio(profile_name=profile)
+        out = _run_task("Portfolio Refresh", lambda: bridge.fetch_binance_portfolio(profile_name=profile))
         if not out.get("ok"):
             st.error(out.get("error", "Portfolio fetch failed"))
         else:
             st.success(f"Portfolio: {profile}")
             st.write(f"Estimated Total (USD): **${float(out.get('estimated_total_usd', 0.0) or 0.0):,.2f}**")
             df = pd.DataFrame(out.get("balances", []) or [])
+            st.session_state.last_portfolio_df = df
             if not df.empty:
                 st.dataframe(df, use_container_width=True, hide_index=True)
 
     if do_oo and profile:
-        out = bridge.list_open_binance_orders(profile_name=profile)
+        out = _run_task("Open Orders Refresh", lambda: bridge.list_open_binance_orders(profile_name=profile))
         if not out.get("ok"):
             st.error(out.get("error", "Open orders fetch failed"))
         else:
             st.success("Open orders loaded")
             df = pd.DataFrame(out.get("orders", []) or [])
+            st.session_state.last_open_orders_df = df
             if not df.empty:
                 st.dataframe(df, use_container_width=True, hide_index=True)
             else:
                 st.info("No open orders.")
 
     if do_led:
-        out = bridge.get_trade_ledger()
+        out = _run_task("Ledger Refresh", lambda: bridge.get_trade_ledger())
         if not out.get("ok"):
             st.error(out.get("error", "Ledger fetch failed"))
         else:
@@ -387,21 +711,191 @@ with tab_portfolio:
             st.write(f"Entries: **{len(entries)}**")
             if entries:
                 df = pd.DataFrame(entries)
+                st.session_state.last_ledger_df = df
                 st.dataframe(df, use_container_width=True, hide_index=True)
+    if do_rec and profile:
+        out = _run_task("Reconcile Fills", lambda: bridge.reconcile_binance_fills(profile_name=profile))
+        if out.get("ok"):
+            st.success(f"Reconcile added={int(out.get('added', 0) or 0)}, dup={int(out.get('duplicates', 0) or 0)}")
+        else:
+            st.error(out.get("error", "Reconcile failed"))
+    if do_review and profile:
+        out = _run_task(
+            "Open Position Review (MTF)",
+            lambda: bridge.analyze_open_positions_multi_tf(profile_name=profile, timeframes=["4h", "8h", "12h", "1d"], display_currency="USD"),
+        )
+        if out.get("ok"):
+            rdf = pd.DataFrame(out.get("rows", []) or [])
+            st.session_state.last_review_df = rdf
+            st.dataframe(rdf, use_container_width=True, hide_index=True)
+        else:
+            st.error(out.get("error", "Review failed"))
+    if do_protect and profile:
+        out = _run_task("Protect Open Positions (AI+BT)", lambda: _protect_open_positions_simple(profile, auto_submit=bool(auto_send_protect)))
+        if out.get("ok"):
+            st.success(f"Protection staged={int(out.get('staged', 0) or 0)}, submitted={int(out.get('submitted', 0) or 0)}")
+        else:
+            st.error(out.get("error", "Protect failed"))
+    if do_prune:
+        out = _run_task("Prune Signal History", lambda: bridge.prune_signal_only_history(keep_last_signals=0))
+        if out.get("ok"):
+            st.success("Signal history pruned.")
+        else:
+            st.error(out.get("error", "Prune failed"))
+
+    st.markdown("### Pending Recommendations")
+    pdf = _pending_df()
+    if not pdf.empty:
+        st.dataframe(pdf, use_container_width=True, hide_index=True)
+        all_ids = [int(x) for x in pdf["id"].tolist()]
+        selected = st.multiselect("Select pending IDs", options=all_ids, default=st.session_state.selected_pending_ids)
+        st.session_state.selected_pending_ids = selected
+        pc = st.columns(4)
+        if pc[0].button("Submit Selected", disabled=not bool(profile)):
+            ok_n = 0
+            fail_n = 0
+            for rid in selected:
+                rec = next((r for r in st.session_state.pending_recs if int(r.get("id", -1)) == int(rid)), None)
+                if not rec:
+                    continue
+                out_sub = _submit_pending_rec(profile, rec)
+                rec["status"] = "SUBMITTED" if out_sub.get("ok") else "FAILED"
+                rec["reason"] = str(rec.get("reason", "")) + (" | submitted" if out_sub.get("ok") else f" | {out_sub.get('error', 'submit failed')}")
+                if out_sub.get("ok"):
+                    ok_n += 1
+                else:
+                    fail_n += 1
+            st.success(f"Submitted={ok_n}, failed={fail_n}")
+        if pc[1].button("Remove Selected"):
+            ids = set(int(x) for x in selected)
+            st.session_state.pending_recs = [r for r in st.session_state.pending_recs if int(r.get("id", -1)) not in ids]
+            st.success(f"Removed {len(ids)} selected.")
+        if pc[2].button("Clear Pending"):
+            st.session_state.pending_recs = []
+            st.session_state.selected_pending_ids = []
+            st.success("Pending cleared.")
+        if pc[3].button("Download Pending CSV"):
+            st.download_button("Save pending.csv", data=pdf.to_csv(index=False), file_name="pending_recommendations.csv", mime="text/csv")
+    else:
+        st.info("No pending recommendations.")
+    st.markdown("### Cached Views")
+    cv1, cv2, cv3 = st.columns(3)
+    with cv1:
+        st.caption("Portfolio (cached)")
+        if isinstance(st.session_state.last_portfolio_df, pd.DataFrame) and not st.session_state.last_portfolio_df.empty:
+            st.dataframe(st.session_state.last_portfolio_df, use_container_width=True, height=220, hide_index=True)
+    with cv2:
+        st.caption("Open Orders (cached)")
+        if isinstance(st.session_state.last_open_orders_df, pd.DataFrame) and not st.session_state.last_open_orders_df.empty:
+            st.dataframe(st.session_state.last_open_orders_df, use_container_width=True, height=220, hide_index=True)
+    with cv3:
+        st.caption("Open Position Review (cached)")
+        if isinstance(st.session_state.last_review_df, pd.DataFrame) and not st.session_state.last_review_df.empty:
+            st.dataframe(st.session_state.last_review_df, use_container_width=True, height=220, hide_index=True)
+    st.caption("Ledger (cached)")
+    if isinstance(st.session_state.last_ledger_df, pd.DataFrame) and not st.session_state.last_ledger_df.empty:
+        st.dataframe(st.session_state.last_ledger_df, use_container_width=True, height=260, hide_index=True)
 
 with tab_graph:
     st.subheader("Position Graph Data")
     names = _load_binance_profiles()
-    profile = st.selectbox("Binance profile (graph)", names, index=0 if names else None, key="graph_profile")
+    profile = _safe_select_option("Binance profile (graph)", names, preferred=(names[0] if names else ""))
     quote_pref = st.selectbox("Quote", ["USDT", "USD", "USDC", "BUSD", "BTC", "ETH", "BNB"], index=0, key="graph_quote")
     if st.button("Refresh Position Graph Data", type="primary", disabled=not bool(profile)):
         with st.spinner("Building position graph data..."):
-            df = _position_graph_rows(profile=profile, quote_pref=quote_pref)
+            df = _run_task("Position Graph Refresh", lambda: _position_graph_rows(profile=profile, quote_pref=quote_pref))
         if df.empty:
             st.info("No open positions found.")
         else:
+            st.session_state.last_graph_df = df.copy()
             st.success(f"Rows: {len(df)}")
             st.dataframe(df, use_container_width=True, hide_index=True)
             chart_df = df.copy()
             chart_df["pnl_pct"] = pd.to_numeric(chart_df["pnl_pct"], errors="coerce").fillna(0.0)
             st.bar_chart(chart_df.set_index("symbol")["pnl_pct"])
+    if isinstance(st.session_state.last_graph_df, pd.DataFrame) and not st.session_state.last_graph_df.empty:
+        st.caption("Cached position graph data")
+        st.dataframe(st.session_state.last_graph_df, use_container_width=True, hide_index=True)
+
+with tab_research:
+    st.subheader("Auto-Research")
+    r1, r2, r3 = st.columns(3)
+    std_btn = r1.button("Run Standard Research", type="primary")
+    trials = int(r2.number_input("Comprehensive Optuna trials", value=10, min_value=1, max_value=200, step=1))
+    jobs = int(r3.number_input("Comprehensive parallel jobs", value=4, min_value=1, max_value=64, step=1))
+    scen_market = st.selectbox("Scenario market", ["crypto", "traditional"], index=0)
+    scen_topn = st.selectbox("Scenario Top N", [10, 20, 50, 100], index=1)
+    scen_tfs = st.multiselect("Scenario timeframes", ["1d", "4h", "8h", "12h"], default=["1d", "4h"])
+    scen_months = st.selectbox("Scenario months", [1, 3, 6, 12, 18, 24], index=3)
+    if std_btn:
+        out = _run_task("Standard Research", lambda: bridge.run_standard_research())
+        if out.get("ok"):
+            st.success("Standard research completed.")
+            st.session_state.last_research_text = str(out.get("output", "") or out.get("stdout", "") or "")
+        else:
+            st.error(out.get("error", "Standard research failed"))
+    if st.button("Run Comprehensive Research"):
+        scenarios = []
+        for tf in (scen_tfs or ["1d"]):
+            scenarios.append({"market": scen_market, "timeframe": tf, "top_n": int(scen_topn), "months": int(scen_months)})
+        out = _run_task("Comprehensive Research", lambda: bridge.run_comprehensive_research(scenarios=scenarios, optuna_trials=trials, optuna_jobs=jobs))
+        if out.get("ok"):
+            st.success("Comprehensive research completed.")
+            st.session_state.last_research_text = str(out.get("output", "") or out.get("stdout", "") or "")
+        else:
+            st.error(out.get("error", "Comprehensive research failed"))
+    if st.session_state.last_research_text:
+        st.text_area("Research Output", value=st.session_state.last_research_text, height=420)
+
+with tab_tasks:
+    st.subheader("Task Monitor")
+    tc = st.columns(3)
+    if tc[0].button("Clear Task Log"):
+        st.session_state.task_logs = []
+    if tc[1].button("Clear Task History"):
+        st.session_state.task_history = []
+    tc[2].write(f"Log lines: {len(st.session_state.task_logs)}")
+    st.text_area("Task Log", value="\n".join(st.session_state.task_logs), height=260)
+    hist_df = pd.DataFrame(st.session_state.task_history) if st.session_state.task_history else pd.DataFrame(columns=["task", "sec", "ts", "ok"])
+    st.dataframe(hist_df, use_container_width=True, hide_index=True)
+
+with tab_settings:
+    st.subheader("Settings")
+    st.caption("Sprint 1 parity: profile controls for AI and Binance.")
+    st.markdown("### AI Profiles")
+    ai_names, ai_active = _load_ai_profiles()
+    ai_pick = _safe_select_option("Select AI profile", ai_names, preferred=ai_active)
+    s1, s2 = st.columns(2)
+    ai_test = s1.button("Test Selected AI Profile", disabled=not bool(ai_pick))
+    ai_set = s2.button("Set Selected as Active", disabled=not bool(ai_pick))
+    if ai_test and ai_pick:
+        out = _run_task("AI Profile Test", lambda: bridge.test_ai_profile(ai_pick))
+        if out.get("ok"):
+            st.success(str(out.get("response", "AI profile OK")))
+        else:
+            st.error(out.get("error", "AI profile test failed"))
+    if ai_set and ai_pick:
+        out = _run_task("AI Set Active", lambda: bridge.set_active_ai_profile(ai_pick))
+        if out.get("ok"):
+            st.success("Active AI profile updated.")
+        else:
+            st.error(out.get("error", "Set active failed"))
+
+    st.markdown("### Binance Profiles")
+    bn_names = _load_binance_profiles()
+    bn_pick = _safe_select_option("Select Binance profile", bn_names, preferred=(bn_names[0] if bn_names else ""))
+    b1, b2 = st.columns(2)
+    bn_test = b1.button("Test Selected Binance Profile", disabled=not bool(bn_pick))
+    bn_set = b2.button("Set Selected as Active", disabled=not bool(bn_pick))
+    if bn_test and bn_pick:
+        out = _run_task("Binance Profile Test", lambda: bridge.test_binance_profile(bn_pick))
+        if out.get("ok"):
+            st.success(f"Profile OK. Server time: {out.get('server_time', '')}")
+        else:
+            st.error(out.get("error", "Binance profile test failed"))
+    if bn_set and bn_pick:
+        out = _run_task("Binance Set Active", lambda: bridge.set_active_binance_profile(bn_pick))
+        if out.get("ok"):
+            st.success("Active Binance profile updated.")
+        else:
+            st.error(out.get("error", "Set active failed"))
