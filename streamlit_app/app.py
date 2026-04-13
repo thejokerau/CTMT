@@ -5,6 +5,7 @@ import os
 import json
 import re
 import time
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,6 +34,79 @@ def get_bridge(repo_root: str) -> EngineBridge:
 REPO_ROOT = str(Path(__file__).resolve().parents[1])
 bridge = get_bridge(REPO_ROOT)
 
+COUNTRY_LABELS: Dict[str, str] = {
+    "1": "Australia",
+    "2": "United States",
+    "3": "United Kingdom",
+    "4": "Europe",
+    "5": "Canada",
+    "6": "Other",
+}
+
+
+def _country_display_values() -> List[str]:
+    return [f"{v} ({k})" for k, v in COUNTRY_LABELS.items()]
+
+
+def _country_display_to_code(display_or_code: str) -> str:
+    raw = str(display_or_code or "").strip()
+    if raw in COUNTRY_LABELS:
+        return raw
+    m = re.search(r"\((\d+)\)\s*$", raw)
+    if m and m.group(1) in COUNTRY_LABELS:
+        return m.group(1)
+    for k, v in COUNTRY_LABELS.items():
+        if raw.lower() == v.lower():
+            return k
+    return "2"
+
+
+def _live_profiles_candidate_paths() -> List[Path]:
+    cands: List[Path] = []
+    home = Path.home()
+    cands.append(home / ".ctmt" / "gui" / "streamlit_live_profiles.json")
+    local_app = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app:
+        cands.append(Path(local_app) / "CTMT" / "gui" / "streamlit_live_profiles.json")
+    repo_root = Path(__file__).resolve().parents[1]
+    cands.append(repo_root / "experiments" / "streamlit" / "streamlit_live_profiles.json")
+    cands.append(Path(tempfile.gettempdir()) / "ctmt" / "streamlit_live_profiles.json")
+    uniq: List[Path] = []
+    seen = set()
+    for p in cands:
+        k = str(p).lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(p)
+    return uniq
+
+
+def _load_live_profiles() -> Dict[str, Any]:
+    for p in _live_profiles_candidate_paths():
+        if not p.exists():
+            continue
+        try:
+            obj = json.loads(p.read_text(encoding="utf-8"))
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            continue
+    return {}
+
+
+def _save_live_profiles(profiles: Dict[str, Any]) -> Tuple[bool, str]:
+    payload = json.dumps(profiles, indent=2)
+    errs: List[str] = []
+    for p in _live_profiles_candidate_paths():
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(payload, encoding="utf-8")
+            return True, str(p)
+        except Exception as exc:
+            errs.append(f"{p}: {exc}")
+            continue
+    return False, " | ".join(errs[-3:])
+
 
 def _init_state() -> None:
     defaults = {
@@ -54,6 +128,7 @@ def _init_state() -> None:
         "last_review_df": pd.DataFrame(),
         "last_graph_df": pd.DataFrame(),
         "last_research_text": "",
+        "live_profile_name": "default",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -509,7 +584,59 @@ with tab_live:
     tf_multi = c3.multiselect("Extra TFs", ["1d", "4h", "8h", "12h"], default=[], key="live_tf_multi")
     top_n = c4.selectbox("Top N", [10, 20, 50, 100], index=1, key="live_topn")
     quote = c5.selectbox("Quote", ["USDT", "USD", "BTC", "ETH", "BNB"], index=0, key="live_quote")
-    country = c6.selectbox("Country (traditional)", ["1", "2", "3", "4", "5", "6"], index=1, key="live_country")
+    country_display = c6.selectbox("Country (traditional)", _country_display_values(), index=1, key="live_country_display")
+    country = _country_display_to_code(country_display)
+
+    st.markdown("### Dashboard Profiles")
+    lp = _load_live_profiles()
+    lp_names = sorted(lp.keys())
+    p1, p2, p3, p4 = st.columns([2, 2, 1, 1])
+    profile_name = p1.text_input("Profile name", value=st.session_state.live_profile_name, key="live_profile_name_input")
+    st.session_state.live_profile_name = profile_name.strip() or "default"
+    selected_profile = p2.selectbox("Saved profiles", [""] + lp_names, index=0, key="live_profile_select")
+    save_profile_btn = p3.button("Save/Update", key="live_profile_save_btn")
+    load_profile_btn = p4.button("Load", key="live_profile_load_btn")
+    p5, p6 = st.columns([1, 4])
+    delete_profile_btn = p5.button("Delete", key="live_profile_delete_btn")
+
+    if save_profile_btn:
+        name = st.session_state.live_profile_name.strip() or "default"
+        lp[name] = {
+            "market": market,
+            "timeframe": timeframe,
+            "extra_timeframes": list(tf_multi),
+            "top_n": int(top_n),
+            "quote": quote,
+            "country": str(country),
+        }
+        ok, where = _save_live_profiles(lp)
+        if ok:
+            st.success(f"Saved profile: {name}")
+        else:
+            st.error(f"Could not save profile. Tried: {where}")
+        st.rerun()
+    if load_profile_btn and selected_profile:
+        prof = lp.get(selected_profile, {})
+        if isinstance(prof, dict):
+            st.session_state["live_market"] = str(prof.get("market", st.session_state.get("live_market", "crypto")))
+            st.session_state["live_tf"] = str(prof.get("timeframe", st.session_state.get("live_tf", "1d")))
+            st.session_state["live_tf_multi"] = list(prof.get("extra_timeframes", []))
+            st.session_state["live_topn"] = int(prof.get("top_n", st.session_state.get("live_topn", 20)))
+            st.session_state["live_quote"] = str(prof.get("quote", st.session_state.get("live_quote", "USDT")))
+            code = str(prof.get("country", "2"))
+            st.session_state["live_country_display"] = f"{COUNTRY_LABELS.get(code, 'United States')} ({code})"
+            st.session_state.live_profile_name = selected_profile
+            st.success(f"Loaded profile: {selected_profile}")
+            st.rerun()
+    if delete_profile_btn and selected_profile:
+        if selected_profile in lp:
+            del lp[selected_profile]
+            ok, where = _save_live_profiles(lp)
+            if ok:
+                st.success(f"Deleted profile: {selected_profile}")
+            else:
+                st.error(f"Could not save profile deletion. Tried: {where}")
+            st.rerun()
     if st.button("Run Live Dashboard", type="primary"):
         run_tfs = [timeframe] + [x for x in tf_multi if x != timeframe]
         combined: List[str] = []
@@ -861,41 +988,123 @@ with tab_tasks:
 
 with tab_settings:
     st.subheader("Settings")
-    st.caption("Sprint 1 parity: profile controls for AI and Binance.")
+    st.caption("Profile management for AI and Binance.")
+
     st.markdown("### AI Profiles")
-    ai_names, ai_active = _load_ai_profiles()
+    ai_list_out = bridge.list_ai_profiles()
+    ai_profiles = ai_list_out.get("profiles", []) if isinstance(ai_list_out.get("profiles"), list) else []
+    ai_active = str(ai_list_out.get("active_profile", "") or "")
+    ai_names = [str(p.get("name", "")).strip() for p in ai_profiles if isinstance(p, dict) and str(p.get("name", "")).strip()]
     ai_pick = _safe_select_option("Select AI profile", ai_names, preferred=ai_active)
-    s1, s2 = st.columns(2)
-    ai_test = s1.button("Test Selected AI Profile", disabled=not bool(ai_pick))
-    ai_set = s2.button("Set Selected as Active", key="ai_set_active_btn", disabled=not bool(ai_pick))
-    if ai_test and ai_pick:
-        out = _run_task("AI Profile Test", lambda: bridge.test_ai_profile(ai_pick))
-        if out.get("ok"):
-            st.success(str(out.get("response", "AI profile OK")))
+    ai_obj = next((p for p in ai_profiles if isinstance(p, dict) and str(p.get("name", "")).strip() == ai_pick), {}) if ai_pick else {}
+    a1, a2, a3 = st.columns(3)
+    ai_name = a1.text_input("AI profile name", value=str(ai_pick or ""), key="set_ai_name")
+    ai_provider = a2.selectbox("Provider", ["xai", "openai", "openai_compatible", "openclaw", "ollama", "anthropic"], index=0 if not ai_obj else max(0, ["xai", "openai", "openai_compatible", "openclaw", "ollama", "anthropic"].index(str(ai_obj.get("provider", "xai")).lower()) if str(ai_obj.get("provider", "xai")).lower() in ["xai", "openai", "openai_compatible", "openclaw", "ollama", "anthropic"] else 0), key="set_ai_provider")
+    ai_model = a3.text_input("Model", value=str(ai_obj.get("model", "grok-3-mini") if isinstance(ai_obj, dict) else "grok-3-mini"), key="set_ai_model")
+    a4, a5, a6 = st.columns([2, 1, 1])
+    ai_endpoint = a4.text_input("Endpoint", value=str(ai_obj.get("endpoint", "") if isinstance(ai_obj, dict) else ""), key="set_ai_endpoint")
+    ai_temp = a5.number_input("Temp", min_value=0.0, max_value=2.0, step=0.1, value=float(ai_obj.get("temperature", 0.2) if isinstance(ai_obj, dict) else 0.2), key="set_ai_temp")
+    ai_internet = a6.checkbox("Internet-enabled", value=bool(ai_obj.get("internet_access", True) if isinstance(ai_obj, dict) else True), key="set_ai_internet")
+    a7, a8, a9, a10 = st.columns(4)
+    ai_save = a7.button("Save AI Profile", key="set_ai_save")
+    ai_set = a8.button("Set Active", key="set_ai_active_btn", disabled=not bool(ai_pick or ai_name))
+    ai_test = a9.button("Test", key="set_ai_test", disabled=not bool(ai_pick or ai_name))
+    ai_delete = a10.button("Delete", key="set_ai_delete", disabled=not bool(ai_pick))
+    ai_key = st.text_input("API key (optional; leave blank to keep)", type="password", key="set_ai_api_key")
+    a11, a12 = st.columns(2)
+    ai_set_key = a11.button("Store API Key", key="set_ai_store_key", disabled=not bool(ai_pick or ai_name))
+    ai_remove_key = a12.button("Remove API Key", key="set_ai_remove_key", disabled=not bool(ai_pick))
+
+    target_ai_name = (ai_pick or ai_name).strip()
+    if ai_save:
+        out = _run_task(
+            "AI Save Profile",
+            lambda: bridge.upsert_ai_profile(
+                name=ai_name.strip(),
+                provider=ai_provider,
+                model=ai_model.strip(),
+                endpoint=ai_endpoint.strip(),
+                internet_access=bool(ai_internet),
+                temperature=float(ai_temp),
+                activate=False,
+            ),
+        )
+        st.success("AI profile saved.") if out.get("ok") else st.error(out.get("error", "Save failed"))
+        st.rerun()
+    if ai_set and target_ai_name:
+        out = _run_task("AI Set Active", lambda: bridge.set_active_ai_profile(target_ai_name))
+        st.success("Active AI profile updated.") if out.get("ok") else st.error(out.get("error", "Set active failed"))
+        st.rerun()
+    if ai_test and target_ai_name:
+        out = _run_task("AI Test", lambda: bridge.test_ai_profile(target_ai_name))
+        st.success(str(out.get("response", "AI profile OK"))) if out.get("ok") else st.error(out.get("error", "AI profile test failed"))
+    if ai_delete and ai_pick:
+        out = _run_task("AI Delete Profile", lambda: bridge.delete_ai_profile(ai_pick))
+        st.success("AI profile deleted.") if out.get("ok") else st.error(out.get("error", "Delete failed"))
+        st.rerun()
+    if ai_set_key and target_ai_name:
+        if ai_key.strip():
+            out = _run_task("AI Store Key", lambda: bridge.set_ai_profile_key(target_ai_name, ai_key.strip()))
+            st.success("AI API key stored.") if out.get("ok") else st.error(out.get("error", "Store key failed"))
         else:
-            st.error(out.get("error", "AI profile test failed"))
-    if ai_set and ai_pick:
-        out = _run_task("AI Set Active", lambda: bridge.set_active_ai_profile(ai_pick))
-        if out.get("ok"):
-            st.success("Active AI profile updated.")
-        else:
-            st.error(out.get("error", "Set active failed"))
+            st.warning("Enter an API key first.")
+    if ai_remove_key and ai_pick:
+        out = _run_task("AI Remove Key", lambda: bridge.remove_ai_profile_key(ai_pick))
+        st.success("AI API key removed.") if out.get("ok") else st.error(out.get("error", "Remove key failed"))
 
     st.markdown("### Binance Profiles")
-    bn_names = _load_binance_profiles()
-    bn_pick = _safe_select_option("Select Binance profile", bn_names, preferred=(bn_names[0] if bn_names else ""))
-    b1, b2 = st.columns(2)
-    bn_test = b1.button("Test Selected Binance Profile", disabled=not bool(bn_pick))
-    bn_set = b2.button("Set Selected as Active", key="binance_set_active_btn", disabled=not bool(bn_pick))
-    if bn_test and bn_pick:
-        out = _run_task("Binance Profile Test", lambda: bridge.test_binance_profile(bn_pick))
-        if out.get("ok"):
-            st.success(f"Profile OK. Server time: {out.get('server_time', '')}")
+    bn_list_out = bridge.list_binance_profiles()
+    bn_profiles = bn_list_out.get("profiles", []) if isinstance(bn_list_out.get("profiles"), list) else []
+    bn_active = str(bn_list_out.get("active_profile", "") or "")
+    bn_names = [str(p.get("name", "")).strip() for p in bn_profiles if isinstance(p, dict) and str(p.get("name", "")).strip()]
+    bn_pick = _safe_select_option("Select Binance profile", bn_names, preferred=bn_active)
+    bn_obj = next((p for p in bn_profiles if isinstance(p, dict) and str(p.get("name", "")).strip() == bn_pick), {}) if bn_pick else {}
+    b1, b2, b3 = st.columns(3)
+    bn_name = b1.text_input("Binance profile name", value=str(bn_pick or ""), key="set_bn_name")
+    bn_endpoint = b2.text_input("Endpoint", value=str(bn_obj.get("endpoint", "https://api.binance.com") if isinstance(bn_obj, dict) else "https://api.binance.com"), key="set_bn_endpoint")
+    b3.text_input("API key env", value=str(bn_obj.get("api_key_env", "BINANCE_API_KEY") if isinstance(bn_obj, dict) else "BINANCE_API_KEY"), key="set_bn_key_env")
+    b4, b5, b6, b7 = st.columns(4)
+    bn_save = b4.button("Save Binance Profile", key="set_bn_save")
+    bn_set = b5.button("Set Active", key="set_bn_active", disabled=not bool(bn_pick or bn_name))
+    bn_test = b6.button("Test", key="set_bn_test", disabled=not bool(bn_pick or bn_name))
+    bn_delete = b7.button("Delete", key="set_bn_delete", disabled=not bool(bn_pick))
+    bn_api_key = st.text_input("Binance API key (optional; leave blank to keep)", type="password", key="set_bn_api_key")
+    bn_api_secret = st.text_input("Binance API secret (optional; leave blank to keep)", type="password", key="set_bn_api_secret")
+    b8, b9 = st.columns(2)
+    bn_store_keys = b8.button("Store Binance Keys", key="set_bn_store_keys", disabled=not bool(bn_pick or bn_name))
+    bn_remove_keys = b9.button("Remove Binance Keys", key="set_bn_remove_keys", disabled=not bool(bn_pick))
+
+    target_bn_name = (bn_pick or bn_name).strip()
+    if bn_save:
+        out = _run_task(
+            "Binance Save Profile",
+            lambda: bridge.upsert_binance_profile(
+                name=bn_name.strip(),
+                endpoint=bn_endpoint.strip() or "https://api.binance.com",
+                api_key_env="BINANCE_API_KEY",
+                api_secret_env="BINANCE_API_SECRET",
+                activate=False,
+            ),
+        )
+        st.success("Binance profile saved.") if out.get("ok") else st.error(out.get("error", "Save failed"))
+        st.rerun()
+    if bn_set and target_bn_name:
+        out = _run_task("Binance Set Active", lambda: bridge.set_active_binance_profile(target_bn_name))
+        st.success("Active Binance profile updated.") if out.get("ok") else st.error(out.get("error", "Set active failed"))
+        st.rerun()
+    if bn_test and target_bn_name:
+        out = _run_task("Binance Test", lambda: bridge.test_binance_profile(target_bn_name))
+        st.success(f"Profile OK. can_trade={out.get('can_trade', '')}") if out.get("ok") else st.error(out.get("error", "Binance profile test failed"))
+    if bn_delete and bn_pick:
+        out = _run_task("Binance Delete Profile", lambda: bridge.delete_binance_profile(bn_pick))
+        st.success("Binance profile deleted.") if out.get("ok") else st.error(out.get("error", "Delete failed"))
+        st.rerun()
+    if bn_store_keys and target_bn_name:
+        if bn_api_key.strip() and bn_api_secret.strip():
+            out = _run_task("Binance Store Keys", lambda: bridge.set_binance_profile_keys(target_bn_name, bn_api_key.strip(), bn_api_secret.strip()))
+            st.success("Binance API keys stored.") if out.get("ok") else st.error(out.get("error", "Store keys failed"))
         else:
-            st.error(out.get("error", "Binance profile test failed"))
-    if bn_set and bn_pick:
-        out = _run_task("Binance Set Active", lambda: bridge.set_active_binance_profile(bn_pick))
-        if out.get("ok"):
-            st.success("Active Binance profile updated.")
-        else:
-            st.error(out.get("error", "Set active failed"))
+            st.warning("Enter both API key and secret first.")
+    if bn_remove_keys and bn_pick:
+        out = _run_task("Binance Remove Keys", lambda: bridge.remove_binance_profile_keys(bn_pick))
+        st.success("Binance API keys removed.") if out.get("ok") else st.error(out.get("error", "Remove keys failed"))
