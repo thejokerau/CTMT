@@ -209,6 +209,22 @@ Unrealized PnL:
 - computed at refresh from open positions using latest market prices.
 - shown in open-positions view and summary lines.
 
+FIFO open->close journal:
+
+- execution-only events are normalized into ordered BUY/SELL fills (`id`, `ts`, `symbol`, `qty`, `price`).
+- SELL quantity is matched against oldest open BUY lots per symbol.
+- each closed match row stores:
+  - entry id/time/price
+  - exit id/time/price
+  - matched qty
+  - realized quote PnL and PnL %
+  - hold duration hours
+- remaining lots are retained as open FIFO lots and marked to latest price for unrealized quote/%.
+- Streamlit `Portfolio & Ledger` shows two FIFO views:
+  - `Closed (Open->Close)`
+  - `Open Lots`
+  with CSV export buttons.
+
 Reconcile/placeholder behavior:
 
 - submit-time market execution rows may be logged as placeholders (`is_placeholder=true`) when exact fill price is not yet known.
@@ -222,6 +238,18 @@ Reconcile/placeholder behavior:
 - Queue-based launch for non-blocking operations.
 - All UI updates marshaled back onto Tk main thread.
 - Long workflows (AI/backtest/protection) run in worker threads.
+
+Live multi-timeframe and measurement windows:
+
+- Live configuration now supports:
+  - primary timeframe (`1d/4h/8h/12h`)
+  - extra timeframes list (multi-panel run)
+  - analysis window mode (`full|days|bars`)
+  - analysis window size (`window_days`, `window_bars`)
+- Engine applies measurement window trimming after indicators are computed, before table/risk scoring.
+- The same live config object is reused by downstream workflows:
+  - `Live -> BT -> AI`
+  - `Protect Open Positions (AI+BT)` live context stage
 
 ## 9. Error Handling Strategy
 
@@ -237,6 +265,14 @@ Reconcile/placeholder behavior:
 - API keys stored in user-local secure settings or env vars.
 - Runtime artifacts and secrets excluded from git.
 - Exchange actions only through explicit mode/guardrail gates.
+
+Local-only artifact policy:
+
+- Streamlit live dashboard profiles are written to user-local storage with fallbacks:
+  - `%USERPROFILE%\\.ctmt\\gui\\streamlit_live_profiles.json` (preferred),
+  - `%LOCALAPPDATA%\\CTMT\\gui\\streamlit_live_profiles.json`,
+  - temp/repo fallback only when required by filesystem permissions.
+- Experiment outputs (`experiments/*` runtime folders), live snapshots, Grok prompts, and runtime logs are treated as generated artifacts and ignored by git.
 
 ## 11. Extension Points
 
