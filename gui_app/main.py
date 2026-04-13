@@ -1050,6 +1050,19 @@ class StrataGuiApp:
                     continue
                 if not bool(e.get("is_execution", False)):
                     continue
+                # Only consume confirmed executions for cost basis.
+                # Some ai_trade_queue rows are "submitted" intents (not actual fills) and
+                # must not reduce lots.
+                panel = str(e.get("panel", "") or "").strip().lower()
+                ex_trade_id = str(e.get("exchange_trade_id", "") or "").strip()
+                note = str(e.get("note", "") or "").strip().lower()
+                is_confirmed_fill = bool(
+                    panel == "binance_reconcile"
+                    or ex_trade_id
+                    or ("reconciled binance fill" in note)
+                )
+                if not is_confirmed_fill:
+                    continue
                 action = str(e.get("action", "")).strip().upper()
                 if action not in ("BUY", "SELL"):
                     continue
