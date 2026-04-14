@@ -231,6 +231,7 @@ def _run_unified_cycle_sync(
     dt_context: str = "",
     signal_order_type: str = "as_ai",
     post_buy_protection_mode: str = "none",
+    ai_only_oco_values: bool = False,
 ) -> Dict[str, Any]:
     # Preflight: refresh exchange state so protection/discovery runs on latest fills/orders.
     try:
@@ -328,6 +329,7 @@ def _run_unified_cycle_sync(
         stop_loss_pct=float(st.session_state.get("sig_sl_pct", 0.0) or 0.0),
         take_profit_pct=float(st.session_state.get("sig_tp_pct", 0.0) or 0.0),
         post_buy_protection_mode=str(post_buy_protection_mode or "none"),
+        ai_only_oco_values=bool(ai_only_oco_values),
     )
     staged = 0
     submitted = 0
@@ -415,6 +417,7 @@ def _init_state() -> None:
         "unified_monitor_auto_submit_new": False,
         "unified_monitor_signal_order_type": "as_ai",
         "unified_monitor_post_buy_mode": "none",
+        "unified_monitor_ai_only_oco": False,
         "unified_monitor_24x7": True,
         "unified_monitor_last_summary": "",
         "unified_monitor_history": [],
@@ -1046,6 +1049,173 @@ def _sync_pending_statuses(profile: str) -> Dict[str, Any]:
     return {"ok": True, "updated": updated, "open_orders": len(open_orders)}
 
 
+def _split_symbol_base_quote(symbol: str) -> Tuple[str, str]:
+    sym = str(symbol or "").strip().upper()
+    m = re.match(r"^([A-Z0-9]+?)(USDT|USDC|FDUSD|BUSD|USD|BTC|ETH|BNB)$", sym)
+    if m:
+        return str(m.group(1) or ""), str(m.group(2) or "")
+    return sym, ""
+
+
+def _retrofit_symbol_to_oco(
+    profile: str,
+    symbol: str,
+    stop_loss_pct: float,
+    take_profit_pct: float,
+    replace_existing: bool = True,
+    use_total_qty: bool = True,
+    explicit_stop_price: float = 0.0,
+    explicit_take_profit_price: float = 0.0,
+) -> Dict[str, Any]:
+    sym = str(symbol or "").strip().upper()
+    if not profile:
+        return {"ok": False, "error": "No Binance profile selected."}
+    if not sym:
+        return {"ok": False, "error": "No symbol selected."}
+    base, _ = _split_symbol_base_quote(sym)
+    if not base:
+        return {"ok": False, "error": f"Could not parse base asset from symbol {sym}."}
+
+    if replace_existing:
+        c = _cancel_open_sell_orders_for_symbol(profile, sym)
+        if not c.get("ok"):
+            return {"ok": False, "error": f"Could not cancel existing protection for {sym}: {c.get('error', 'unknown')}"}
+
+    qty = _get_asset_total_balance(profile, base) if use_total_qty else _get_asset_free_balance(profile, base)
+    if qty <= 0:
+        return {"ok": False, "error": f"No available quantity for {sym} to protect."}
+
+    lp = bridge.get_binance_last_price(symbol=sym, profile_name=profile)
+    if not lp.get("ok"):
+        return {"ok": False, "error": f"Could not fetch last price for {sym}: {lp.get('error', 'unknown')}"}
+    try:
+        px = float(lp.get("price", 0.0) or 0.0)
+    except Exception:
+        px = 0.0
+    if px <= 0:
+        return {"ok": False, "error": f"Invalid last price for {sym}."}
+
+    ex_sl = float(explicit_stop_price or 0.0)
+    ex_tp = float(explicit_take_profit_price or 0.0)
+    if ex_sl > 0 and ex_tp > 0:
+        sl = ex_sl
+        tp = ex_tp
+    else:
+        sl_pct = max(0.1, float(stop_loss_pct or 0.0))
+        tp_pct = max(0.1, float(take_profit_pct or 0.0))
+        sl = px * (1.0 - sl_pct / 100.0)
+        tp = px * (1.0 + tp_pct / 100.0)
+
+    oco = bridge.submit_binance_oco_sell(
+        symbol=sym,
+        quantity=float(qty),
+        take_profit_price=float(tp),
+        stop_price=float(sl),
+        stop_limit_price=float(sl * 0.999),
+        profile_name=profile,
+    )
+    if not oco.get("ok"):
+        return {"ok": False, "error": str(oco.get("error", "OCO submit failed")), "symbol": sym, "qty": qty, "stop": sl, "tp": tp}
+    return {
+        "ok": True,
+        "symbol": sym,
+        "qty": float(oco.get("normalized_quantity", qty) or qty),
+        "last_price": px,
+        "stop": float(oco.get("normalized_stop_price", sl) or sl),
+        "tp": float(oco.get("normalized_take_profit_price", tp) or tp),
+    }
+
+
+def _derive_oco_prices_live_bt_ai(
+    profile: str,
+    symbol: str,
+    live_profile_name: str = "",
+    strict_ai_values: bool = False,
+    fallback_stop_pct: float = 5.0,
+    fallback_tp_pct: float = 10.0,
+) -> Dict[str, Any]:
+    sym = str(symbol or "").strip().upper()
+    if not profile or not sym:
+        return {"ok": False, "error": "Missing profile or symbol."}
+    try:
+        live_cfg = _build_live_cfg_from_state_or_profile(profile_name=live_profile_name)
+        live_res = _run_live_cfg_bundle_sync(live_cfg)
+        live_text = str(live_res.get("combined_text", "") or "").strip() if live_res.get("ok") else ""
+    except Exception as ex:
+        live_text = ""
+        _log(f"Retrofit AI live context warning: {ex}")
+
+    bt_cfg = {
+        "market": str(st.session_state.get("bt_market", "crypto")),
+        "timeframe": str(st.session_state.get("bt_tf", "1d")),
+        "top_n": int(st.session_state.get("bt_topn", 20)),
+        "months": int(st.session_state.get("bt_months", 12)),
+        "country": "2",
+        "quote_currency": str(st.session_state.get("live_quote", "USDT")),
+        "display_currency": "USD",
+        "initial_capital": 10000.0,
+        "stop_loss_pct": 8.0,
+        "take_profit_pct": 20.0,
+        "max_hold_days": 45,
+        "min_hold_bars": 2,
+        "cooldown_bars": 1,
+        "same_asset_cooldown_bars": 3,
+        "max_consecutive_same_asset_entries": 3,
+        "fee_pct": 0.1,
+        "slippage_pct": 0.05,
+        "position_size": 0.30,
+        "atr_multiplier": 2.2,
+        "adx_threshold": 25.0,
+        "cmf_threshold": 0.02,
+        "obv_slope_threshold": 0.0,
+        "buy_threshold": 2,
+        "sell_threshold": -2,
+        "cache_workers": 4,
+        "max_drawdown_limit_pct": 35.0,
+        "max_exposure_pct": 0.4,
+        "auto_tune": False,
+        "optuna_trials": 10,
+        "optuna_jobs": 2,
+    }
+    bt_res = bridge.run_backtest(bt_cfg)
+    bt_text = ""
+    if bt_res.get("ok"):
+        bt_text = "\n\n".join([str(bt_res.get("summary_text", "") or ""), str(bt_res.get("trade_text", "") or "")]).strip()
+
+    source = "\n\n".join(
+        [
+            f"TARGET_SYMBOL: {sym}",
+            "Task: produce a protective SELL OCO plan for this open position only.",
+            "Output must include stop_loss_price and take_profit_price in JSON trade fields.",
+            str(live_text),
+            str(bt_text),
+        ]
+    ).strip()
+    ai = bridge.run_ai_analysis(source, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    if not ai.get("ok"):
+        if strict_ai_values:
+            return {"ok": False, "error": str(ai.get("error", "AI failed for OCO derivation"))}
+        return {"ok": True, "fallback": True}
+    recs = _extract_trade_recs(str(ai.get("response", "") or ""), default_tf=str(st.session_state.get("bt_tf", "4h") or "4h"))
+    pick = None
+    for r in recs:
+        if not isinstance(r, dict):
+            continue
+        rs = str(r.get("symbol", "")).strip().upper()
+        if rs != sym:
+            continue
+        sl = float(r.get("stop_loss_price", 0.0) or 0.0)
+        tp = float(r.get("take_profit_price", 0.0) or 0.0)
+        if sl > 0 and tp > 0:
+            pick = {"stop": sl, "tp": tp}
+            break
+    if pick:
+        return {"ok": True, "fallback": False, "stop": float(pick["stop"]), "tp": float(pick["tp"])}
+    if strict_ai_values:
+        return {"ok": False, "error": f"AI did not return SL/TP for {sym}."}
+    return {"ok": True, "fallback": True}
+
+
 def _compact_pending_queue() -> Dict[str, Any]:
     rows = st.session_state.pending_recs if isinstance(st.session_state.pending_recs, list) else []
     history = st.session_state.pending_history if isinstance(st.session_state.pending_history, list) else []
@@ -1236,6 +1406,7 @@ def _apply_signal_controls(
     stop_loss_pct: float,
     take_profit_pct: float,
     post_buy_protection_mode: str = "none",
+    ai_only_oco_values: bool = False,
 ) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     quote = str(quote_asset or "USDT").strip().upper() or "USDT"
@@ -1246,6 +1417,8 @@ def _apply_signal_controls(
         rr = dict(r)
         sym = str(rr.get("symbol", "")).strip().upper()
         side = str(rr.get("side", "BUY")).strip().upper()
+        ai_sl = float(rr.get("stop_loss_price", 0.0) or 0.0)
+        ai_tp = float(rr.get("take_profit_price", 0.0) or 0.0)
         if not sym:
             asset = str(rr.get("asset", "")).strip().upper()
             if asset:
@@ -1296,12 +1469,16 @@ def _apply_signal_controls(
                 rr["quantity"] = 0.0
                 rr["reason"] = str(rr.get("reason", "")) + f" | autosized BUY using {rr['quote_notional']} {quote}"
             if force_protection and px > 0:
-                if float(rr.get("stop_loss_price", 0.0) or 0.0) <= 0:
-                    rr["stop_loss_price"] = px * (1.0 - max(0.0, float(stop_loss_pct or 0.0)) / 100.0)
-                if float(rr.get("take_profit_price", 0.0) or 0.0) <= 0:
-                    rr["take_profit_price"] = px * (1.0 + max(0.0, float(take_profit_pct or 0.0)) / 100.0)
+                if not bool(ai_only_oco_values):
+                    if float(rr.get("stop_loss_price", 0.0) or 0.0) <= 0:
+                        rr["stop_loss_price"] = px * (1.0 - max(0.0, float(stop_loss_pct or 0.0)) / 100.0)
+                    if float(rr.get("take_profit_price", 0.0) or 0.0) <= 0:
+                        rr["take_profit_price"] = px * (1.0 + max(0.0, float(take_profit_pct or 0.0)) / 100.0)
             rr["post_buy_protection_mode"] = str(post_buy_protection_mode or "none").strip().lower()
             if str(rr.get("post_buy_protection_mode", "none")).lower() == "oco":
+                if bool(ai_only_oco_values) and not (ai_sl > 0 and ai_tp > 0):
+                    _log(f"Dropped BUY {sym}: AI-only OCO mode requires AI-provided SL+TP.")
+                    continue
                 sl_b = float(rr.get("stop_loss_price", 0.0) or 0.0)
                 tp_b = float(rr.get("take_profit_price", 0.0) or 0.0)
                 if sl_b <= 0 or tp_b <= 0:
@@ -1326,12 +1503,16 @@ def _apply_signal_controls(
                 _log(f"Dropped SELL {sym}: computed quantity is zero")
                 continue
             if force_protection and px > 0:
-                if float(rr.get("stop_loss_price", 0.0) or 0.0) <= 0:
-                    rr["stop_loss_price"] = px * (1.0 - max(0.0, float(stop_loss_pct or 0.0)) / 100.0)
-                if float(rr.get("take_profit_price", 0.0) or 0.0) <= 0:
-                    rr["take_profit_price"] = px * (1.0 + max(0.0, float(take_profit_pct or 0.0)) / 100.0)
+                if not bool(ai_only_oco_values):
+                    if float(rr.get("stop_loss_price", 0.0) or 0.0) <= 0:
+                        rr["stop_loss_price"] = px * (1.0 - max(0.0, float(stop_loss_pct or 0.0)) / 100.0)
+                    if float(rr.get("take_profit_price", 0.0) or 0.0) <= 0:
+                        rr["take_profit_price"] = px * (1.0 + max(0.0, float(take_profit_pct or 0.0)) / 100.0)
 
         if str(rr.get("order_type", "")).strip().upper() == "OCO_BRACKET":
+            if bool(ai_only_oco_values) and not (ai_sl > 0 and ai_tp > 0):
+                _log(f"Dropped {side} {sym}: AI-only OCO mode requires AI-provided SL+TP.")
+                continue
             sl = float(rr.get("stop_loss_price", 0.0) or 0.0)
             tp = float(rr.get("take_profit_price", 0.0) or 0.0)
             if sl > 0 and tp > 0:
@@ -2387,7 +2568,7 @@ with tab_ai:
         signal_pct_balance = float(sc6.number_input("% of quote balance", min_value=0.0, max_value=100.0, value=30.0, step=1.0, key="sig_pct_balance"))
         signal_protect = bool(sc7.checkbox("Add default SL/TP", value=True, key="sig_add_protect"))
         signal_auto_submit = bool(sc8.checkbox("Auto-submit after stage", value=False, key="sig_auto_submit"))
-        sc9, sc10, sc11 = st.columns(3)
+        sc9, sc10, sc11, sc12 = st.columns(4)
         signal_sl_pct = float(sc9.number_input("Default stop-loss %", min_value=0.1, max_value=80.0, value=5.0, step=0.5, key="sig_sl_pct"))
         signal_tp_pct = float(sc10.number_input("Default take-profit %", min_value=0.1, max_value=300.0, value=10.0, step=1.0, key="sig_tp_pct"))
         signal_post_buy_mode = str(
@@ -2397,6 +2578,14 @@ with tab_ai:
                 index=0,
                 key="sig_post_buy_mode",
                 help="none = no automatic bracket after buy; oco = submit SELL OCO after buy fill using SL/TP values.",
+            )
+        )
+        signal_ai_only_oco = bool(
+            sc12.checkbox(
+                "AI-only OCO values",
+                value=False,
+                key="sig_ai_only_oco",
+                help="When ON, OCO/post-BUY-OCO requires AI-provided SL/TP. No fallback SL/TP auto-fill.",
             )
         )
     if ai_cols[1].button("Set Active") and ai_profile:
@@ -2422,6 +2611,7 @@ with tab_ai:
                 stop_loss_pct=float(signal_sl_pct or 0.0),
                 take_profit_pct=float(signal_tp_pct or 0.0),
                 post_buy_protection_mode=signal_post_buy_mode,
+                ai_only_oco_values=bool(signal_ai_only_oco),
             )
             seq0 = int(st.session_state.pending_rec_seq or 0)
             n = _append_pending(recs, source="ai_interpretation")
@@ -2564,6 +2754,7 @@ with tab_ai:
                 "signal_sl_pct": float(signal_sl_pct or 0.0),
                 "signal_tp_pct": float(signal_tp_pct or 0.0),
                 "signal_post_buy_mode": str(signal_post_buy_mode or "none"),
+                "signal_ai_only_oco": bool(signal_ai_only_oco),
                 "default_tf": str(st.session_state.get("bt_tf", "4h")),
             }
             jobs[jid] = j
@@ -2613,6 +2804,7 @@ with tab_ai:
                         stop_loss_pct=float(meta.get("signal_sl_pct", 0.0) or 0.0),
                         take_profit_pct=float(meta.get("signal_tp_pct", 0.0) or 0.0),
                         post_buy_protection_mode=str(meta.get("signal_post_buy_mode", "none") or "none"),
+                        ai_only_oco_values=bool(meta.get("signal_ai_only_oco", False)),
                     )
                     if recs:
                         seq0 = int(st.session_state.pending_rec_seq or 0)
@@ -2779,6 +2971,115 @@ with tab_portfolio:
         f"Unified new-entry behavior: order type `{str(unified_signal_order_type)}` | BUY follow-up `{str(unified_post_buy_mode)}`"
     )
 
+    st.markdown("### Retrofit Selected Position to OCO")
+    rcols = st.columns([2, 1, 1, 2, 2])
+    _retro_syms = _portfolio_symbols_for_profile(profile=profile, quote_pref=str(st.session_state.get("live_quote", "USDT") or "USDT")) if profile else []
+    _retro_pick = rcols[0].selectbox(
+        "Open symbol",
+        ["(none)"] + sorted(_retro_syms),
+        index=0,
+        key="retrofit_oco_symbol",
+        help="Pick an existing held symbol to apply/replace with an OCO bracket.",
+    )
+    _retro_sl = float(
+        rcols[1].number_input(
+            "Stop %",
+            min_value=0.1,
+            max_value=80.0,
+            value=float(st.session_state.get("sig_sl_pct", 5.0) or 5.0),
+            step=0.5,
+            key="retrofit_oco_sl_pct",
+        )
+    )
+    _retro_tp = float(
+        rcols[2].number_input(
+            "TP %",
+            min_value=0.1,
+            max_value=300.0,
+            value=float(st.session_state.get("sig_tp_pct", 10.0) or 10.0),
+            step=1.0,
+            key="retrofit_oco_tp_pct",
+        )
+    )
+    _retro_replace = bool(
+        rcols[3].checkbox(
+            "Replace existing protection",
+            value=True,
+            key="retrofit_oco_replace_existing",
+            help="Cancels existing SELL protection orders for this symbol before placing fresh OCO.",
+        )
+    )
+    _retro_use_total = bool(
+        rcols[4].checkbox(
+            "Use total position qty",
+            value=True,
+            key="retrofit_oco_use_total",
+            help="ON uses total held qty. OFF uses free qty only.",
+        )
+    )
+    rcols2 = st.columns([2, 2, 2])
+    _retro_use_pipeline = bool(
+        rcols2[0].checkbox(
+            "Use Live > BT > AI values",
+            value=False,
+            key="retrofit_oco_use_live_bt_ai",
+            help="Derive stop/take-profit from Live+Backtest+AI context for this symbol.",
+        )
+    )
+    _retro_ai_only = bool(
+        rcols2[1].checkbox(
+            "AI-only values (no fallback)",
+            value=bool(st.session_state.get("sig_ai_only_oco", False)),
+            key="retrofit_oco_ai_only",
+            help="If ON and AI does not return SL/TP, retrofit fails instead of using percentage fallback.",
+        )
+    )
+    rcols2[2].caption("Tip: if AI mode is OFF, SL/TP percentages are used.")
+    do_preview_retrofit = st.button("Preview OCO Values", disabled=(not bool(profile) or _retro_pick == "(none)"))
+    do_retrofit_oco = st.button("Retrofit Selected to OCO", disabled=(not bool(profile) or _retro_pick == "(none)"))
+
+    if do_preview_retrofit and profile and _retro_pick != "(none)":
+        base_px = 0.0
+        lp_prev = bridge.get_binance_last_price(symbol=str(_retro_pick), profile_name=profile)
+        if lp_prev.get("ok"):
+            try:
+                base_px = float(lp_prev.get("price", 0.0) or 0.0)
+            except Exception:
+                base_px = 0.0
+        preview_src = "fallback"
+        sl_prev = base_px * (1.0 - float(_retro_sl) / 100.0) if base_px > 0 else 0.0
+        tp_prev = base_px * (1.0 + float(_retro_tp) / 100.0) if base_px > 0 else 0.0
+        if bool(_retro_use_pipeline):
+            picked_lp = "" if protect_live_profile_pick == "(current live settings)" else str(protect_live_profile_pick)
+            dprev = _run_task(
+                "Preview OCO from Live->BT->AI",
+                lambda p=profile, s=str(_retro_pick), lp=picked_lp, strict=bool(_retro_ai_only), sl=float(_retro_sl), tp=float(_retro_tp): _derive_oco_prices_live_bt_ai(
+                    profile=p,
+                    symbol=s,
+                    live_profile_name=lp,
+                    strict_ai_values=strict,
+                    fallback_stop_pct=sl,
+                    fallback_tp_pct=tp,
+                ),
+            )
+            if dprev.get("ok"):
+                if not bool(dprev.get("fallback", False)):
+                    preview_src = "AI"
+                    sl_prev = float(dprev.get("stop", 0.0) or 0.0)
+                    tp_prev = float(dprev.get("tp", 0.0) or 0.0)
+                else:
+                    preview_src = "fallback"
+            else:
+                st.error(str(dprev.get("error", "Preview derivation failed")))
+        rr = 0.0
+        if base_px > 0 and sl_prev > 0 and tp_prev > 0 and (base_px - sl_prev) > 0:
+            rr = (tp_prev - base_px) / (base_px - sl_prev)
+        pc_prev = st.columns(4)
+        pc_prev[0].metric("Preview source", preview_src.upper())
+        pc_prev[1].metric("Last price", f"{base_px:.8f}" if base_px > 0 else "n/a")
+        pc_prev[2].metric("Stop / TP", f"{sl_prev:.8f} / {tp_prev:.8f}" if sl_prev > 0 and tp_prev > 0 else "n/a")
+        pc_prev[3].metric("Est. R:R", f"{rr:.2f}" if rr > 0 else "n/a")
+
     if do_pf and profile:
         out = _run_task("Portfolio Refresh", lambda: bridge.fetch_binance_portfolio(profile_name=profile))
         if not out.get("ok"):
@@ -2847,6 +3148,58 @@ with tab_portfolio:
             _show_df(rdf, width="stretch", hide_index=True)
         else:
             st.error(out.get("error", "Review failed"))
+    if do_retrofit_oco and profile:
+        pick_sym = str(st.session_state.get("retrofit_oco_symbol", "(none)") or "(none)")
+        if pick_sym == "(none)":
+            st.warning("Pick a symbol first.")
+        else:
+            ex_sl = 0.0
+            ex_tp = 0.0
+            if bool(_retro_use_pipeline):
+                picked_lp = "" if protect_live_profile_pick == "(current live settings)" else str(protect_live_profile_pick)
+                d = _run_task(
+                    "Derive OCO from Live->BT->AI",
+                    lambda p=profile, s=pick_sym, lp=picked_lp, strict=bool(_retro_ai_only), sl=float(_retro_sl), tp=float(_retro_tp): _derive_oco_prices_live_bt_ai(
+                        profile=p,
+                        symbol=s,
+                        live_profile_name=lp,
+                        strict_ai_values=strict,
+                        fallback_stop_pct=sl,
+                        fallback_tp_pct=tp,
+                    ),
+                )
+                if not d.get("ok"):
+                    st.error(str(d.get("error", "Could not derive OCO values from Live>BT>AI.")))
+                    d = {}
+                else:
+                    if not bool(d.get("fallback", False)):
+                        ex_sl = float(d.get("stop", 0.0) or 0.0)
+                        ex_tp = float(d.get("tp", 0.0) or 0.0)
+                        st.info(f"Using Live>BT>AI OCO values: SL={ex_sl:.8f}, TP={ex_tp:.8f}")
+                    else:
+                        st.info("Live>BT>AI did not return SL/TP for symbol; using % fallback.")
+            out = _run_task(
+                "Retrofit Selected Position to OCO",
+                lambda p=profile, s=pick_sym, sl=float(_retro_sl), tp=float(_retro_tp), rep=bool(_retro_replace), ut=bool(_retro_use_total), es=float(ex_sl), et=float(ex_tp): _retrofit_symbol_to_oco(
+                    profile=p,
+                    symbol=s,
+                    stop_loss_pct=sl,
+                    take_profit_pct=tp,
+                    replace_existing=rep,
+                    use_total_qty=ut,
+                    explicit_stop_price=es,
+                    explicit_take_profit_price=et,
+                ),
+            )
+            if out.get("ok"):
+                st.success(
+                    f"OCO set for {out.get('symbol')} qty={float(out.get('qty', 0.0) or 0.0):.8f} | "
+                    f"SL={float(out.get('stop', 0.0) or 0.0):.8f} TP={float(out.get('tp', 0.0) or 0.0):.8f}"
+                )
+                bridge.list_open_binance_orders(profile_name=profile)
+                _sync_pending_statuses(profile)
+            else:
+                st.error(str(out.get("error", "Retrofit OCO failed")))
     if do_protect and profile:
         out = _run_task("Protect Open Positions (AI+BT)", lambda: _protect_open_positions_simple(profile, auto_submit=bool(auto_send_protect)))
         if out.get("ok"):
@@ -2878,6 +3231,7 @@ with tab_portfolio:
                 dt_context=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 signal_order_type=str(unified_signal_order_type or "as_ai"),
                 post_buy_protection_mode=str(unified_post_buy_mode or "none"),
+                ai_only_oco_values=bool(st.session_state.get("sig_ai_only_oco", False)),
             ),
         )
         if out.get("ok"):
@@ -2918,6 +3272,7 @@ with tab_portfolio:
         st.session_state.unified_monitor_auto_submit_new = bool(auto_submit_unified_new)
         st.session_state.unified_monitor_signal_order_type = str(unified_signal_order_type or "as_ai")
         st.session_state.unified_monitor_post_buy_mode = str(unified_post_buy_mode or "none")
+        st.session_state.unified_monitor_ai_only_oco = bool(st.session_state.get("sig_ai_only_oco", False))
         st.success("Unified Monitor started.")
         st.rerun()
     if stop_unified:
@@ -2972,6 +3327,7 @@ with tab_portfolio:
                     dt_context=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     signal_order_type=str(st.session_state.get("unified_monitor_signal_order_type", "as_ai") or "as_ai"),
                     post_buy_protection_mode=str(st.session_state.get("unified_monitor_post_buy_mode", "none") or "none"),
+                    ai_only_oco_values=bool(st.session_state.get("unified_monitor_ai_only_oco", False)),
                 ),
             )
             if out.get("ok"):

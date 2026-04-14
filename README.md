@@ -287,6 +287,12 @@ GUI Portfolio & Ledger:
     - `Clean Queue` action archives/removes stale non-actionable rows (`OPEN/FILLED/CANCELED/EXPIRED`) from pending queue
     - pending selection UX now uses row checkboxes in-table (faster than ID multiselect)
   - Unified Cycle preflight now refreshes exchange state (`reconcile fills + open orders snapshot`) before protection/discovery steps
+  - Manual protection retrofit:
+    - `Retrofit Selected Position to OCO` in Portfolio tab
+    - select a held symbol, set stop/take-profit percentages, and apply OCO directly
+    - optional replace mode cancels existing SELL protection orders for that symbol before submitting the fresh OCO
+    - optional `Use Live > BT > AI values` derives SL/TP from pipeline context for the selected symbol before retrofit
+    - optional `AI-only values (no fallback)` fails fast when AI does not provide SL/TP instead of using percentage fallback
   - Manual ledger event entry (`BUY/SELL/HOLD`)
   - Current open-position tracking + historical ledger view
 
