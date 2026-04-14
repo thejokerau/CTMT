@@ -3081,10 +3081,12 @@ with tab_portfolio:
             ids = set(int(x) for x in selected)
             st.session_state.pending_recs = [r for r in st.session_state.pending_recs if int(r.get("id", -1)) not in ids]
             st.success(f"Removed {len(ids)} selected.")
+            st.rerun()
         if pc[2].button("Clear Pending"):
             st.session_state.pending_recs = []
             st.session_state.selected_pending_ids = []
             st.success("Pending cleared.")
+            st.rerun()
         if pc[3].button("Download Pending CSV"):
             st.download_button("Save pending.csv", data=pdf.to_csv(index=False), file_name="pending_recommendations.csv", mime="text/csv")
         if pc[4].button("Sync Pending Status", disabled=not bool(profile)):
@@ -3096,6 +3098,7 @@ with tab_portfolio:
         if pc[5].button("Clean Queue"):
             cout = _compact_pending_queue()
             st.success(f"Queue cleaned: removed={int(cout.get('removed', 0) or 0)}, remaining={int(cout.get('remaining', 0) or 0)}")
+            st.rerun()
     else:
         st.info("No pending recommendations.")
     st.markdown("### Cached Views")
