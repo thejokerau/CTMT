@@ -262,6 +262,11 @@ GUI Portfolio & Ledger:
     - step 1: manage current holdings (`Protect Open Positions (Live > BT > AI)`)
     - step 2: discover and stage new opportunities (`Live > BT > AI > Stage`)
     - optional auto-submit toggle for newly discovered entries
+    - explicit Unified controls for:
+      - new-entry order type override (`as_ai`, `MARKET`, `LIMIT`, `STOP_LOSS_LIMIT`, `TAKE_PROFIT_LIMIT`, `OCO_BRACKET`)
+      - BUY follow-up protection mode (`none`, `oco`)
+    - OCO safety guard: recommendations requiring OCO are now dropped if both SL and TP are unavailable (instead of staging invalid OCO rows)
+    - protective price guard: when OCO/BUY-follow-up-oco is selected, missing SL/TP fields are auto-filled from configured SL/TP percentages when price data is available
     - keeps outputs synchronized into Live/Backtest/AI cached panes
   - `Unified Monitor` automation controls:
     - start/stop scheduled Unified Cycle
@@ -275,6 +280,10 @@ GUI Portfolio & Ledger:
     - logs per-timeframe actions and vote-based stance (`HOLD/ADD`, `HOLD`, `REDUCE/EXIT`)
   - Signal import from latest live dashboard output
   - Duplicate-signal activity guard (cooldown-based) to reduce repeated same-signal actions
+  - Pending recommendation lifecycle improvements:
+    - submit attempts now persist exchange order references (when returned)
+    - `Sync Pending Status` action reconciles pending rows against Binance open orders + reconciled ledger fills
+    - statuses now progress more clearly (`PENDING` -> `SUBMITTED/OPEN` -> `FILLED` where fill evidence exists)
   - Manual ledger event entry (`BUY/SELL/HOLD`)
   - Current open-position tracking + historical ledger view
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import json
 import re
@@ -229,6 +229,8 @@ def _run_unified_cycle_sync(
     auto_send_protect: bool = False,
     auto_submit_new: bool = False,
     dt_context: str = "",
+    signal_order_type: str = "as_ai",
+    post_buy_protection_mode: str = "none",
 ) -> Dict[str, Any]:
     # 1) Manage existing positions.
     protect_out = _protect_open_positions_live_bt_ai(
@@ -307,13 +309,14 @@ def _run_unified_cycle_sync(
         recs=recs,
         profile=str(st.session_state.get("sig_exec_profile", profile) or profile),
         quote_asset=str(st.session_state.get("sig_quote", "USDT") or "USDT"),
-        order_type_policy=str(st.session_state.get("sig_order_type", "as_ai") or "as_ai"),
+        order_type_policy=str(signal_order_type or "as_ai"),
         autosize_mode=str(st.session_state.get("sig_autosize", "none") or "none"),
         fixed_quote_notional=float(st.session_state.get("sig_fixed_notional", 0.0) or 0.0),
         pct_quote_balance=float(st.session_state.get("sig_pct_balance", 0.0) or 0.0),
         apply_protection=bool(st.session_state.get("sig_add_protect", False)),
         stop_loss_pct=float(st.session_state.get("sig_sl_pct", 0.0) or 0.0),
         take_profit_pct=float(st.session_state.get("sig_tp_pct", 0.0) or 0.0),
+        post_buy_protection_mode=str(post_buy_protection_mode or "none"),
     )
     staged = 0
     submitted = 0
@@ -329,11 +332,7 @@ def _run_unified_cycle_sync(
                 if int(rec.get("id", -1)) not in new_ids:
                     continue
                 out_sub = _submit_with_recovery(profile, rec, enable_recovery=bool(st.session_state.get("auto_retry_locked_sell", True)))
-                rec["status"] = "SUBMITTED" if out_sub.get("ok") else "FAILED"
-                rec["reason"] = str(rec.get("reason", "")) + (
-                    f" | {out_sub.get('recovery_note', 'submitted')}" if out_sub.get("ok") else f" | {out_sub.get('error', 'submit failed')}"
-                )
-                if out_sub.get("ok"):
+                if _apply_submit_result_to_rec(rec, out_sub):
                     submitted += 1
                 else:
                     failed += 1
@@ -398,12 +397,17 @@ def _init_state() -> None:
         "unified_monitor_next_epoch": 0.0,
         "unified_monitor_last_epoch": 0.0,
         "unified_monitor_busy": False,
+        "unified_monitor_started_epoch": 0.0,
         "unified_monitor_live_profile": "",
         "unified_monitor_auto_send_protect": False,
         "unified_monitor_auto_submit_new": False,
+        "unified_monitor_signal_order_type": "as_ai",
+        "unified_monitor_post_buy_mode": "none",
         "unified_monitor_24x7": True,
         "unified_monitor_last_summary": "",
         "unified_monitor_history": [],
+        "unified_signal_order_type": "as_ai",
+        "unified_post_buy_mode": "none",
         "pf_last_loaded_epoch": 0.0,
         "pf_last_review_epoch": 0.0,
         "global_prefetch_enabled": True,
@@ -814,6 +818,44 @@ def _submit_pending_rec(profile: str, rec: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _try_attach_post_buy_protection(profile: str, rec: Dict[str, Any], submit_out: Dict[str, Any]) -> Dict[str, Any]:
+    side = str(rec.get("side", "")).strip().upper()
+    mode = str(rec.get("post_buy_protection_mode", "none") or "none").strip().lower()
+    if side != "BUY" or mode != "oco":
+        return {"attempted": False}
+    sym = str(rec.get("symbol", "")).strip().upper()
+    if not sym:
+        return {"attempted": False}
+    sl = float(rec.get("stop_loss_price", 0.0) or 0.0)
+    tp = float(rec.get("take_profit_price", 0.0) or 0.0)
+    if sl <= 0 or tp <= 0:
+        return {"attempted": True, "ok": False, "error": "Missing stop/take-profit prices for post-buy OCO."}
+    try:
+        qty = float(submit_out.get("normalized_quantity", rec.get("quantity", 0.0)) or 0.0)
+    except Exception:
+        qty = 0.0
+    # Use free balance as final cap (BUY may consume fees and leave slightly less than submitted qty).
+    m = re.match(r"^([A-Z0-9]+?)(USDT|USDC|FDUSD|BUSD|USD|BTC|ETH|BNB)$", sym)
+    base_asset = m.group(1) if m else str(rec.get("asset", "")).strip().upper()
+    if base_asset:
+        free_qty = _get_asset_free_balance(profile, base_asset)
+        if free_qty > 0:
+            qty = min(qty if qty > 0 else free_qty, free_qty)
+    if qty <= 0:
+        return {"attempted": True, "ok": False, "error": f"No available filled quantity to protect for {sym}."}
+    oco = bridge.submit_binance_oco_sell(
+        symbol=sym,
+        quantity=qty,
+        take_profit_price=tp,
+        stop_price=sl,
+        stop_limit_price=(sl * 0.999),
+        profile_name=profile,
+    )
+    if oco.get("ok"):
+        return {"attempted": True, "ok": True, "qty": qty, "symbol": sym}
+    return {"attempted": True, "ok": False, "error": str(oco.get("error", "post-buy OCO failed"))}
+
+
 def _is_insufficient_balance_error(err: Any) -> bool:
     s = str(err or "").lower()
     return ("insufficient balance" in s) or ("code\":-2010" in s) or ("code -2010" in s) or ("code: -2010" in s)
@@ -852,7 +894,16 @@ def _cancel_open_sell_orders_for_symbol(profile: str, symbol: str) -> Dict[str, 
 
 def _submit_with_recovery(profile: str, rec: Dict[str, Any], enable_recovery: bool = True) -> Dict[str, Any]:
     out = _submit_pending_rec(profile, rec)
-    if out.get("ok") or not enable_recovery:
+    if out.get("ok"):
+        prot = _try_attach_post_buy_protection(profile, rec, out)
+        if prot.get("attempted"):
+            out["post_buy_protection"] = prot
+            if prot.get("ok"):
+                out["recovery_note"] = str(out.get("recovery_note", "") or "") + f" | post-buy OCO attached ({prot.get('symbol', '')} qty={float(prot.get('qty', 0.0) or 0.0):.8f})"
+            else:
+                out["recovery_note"] = str(out.get("recovery_note", "") or "") + f" | post-buy OCO not attached: {prot.get('error', 'unknown')}"
+        return out
+    if not enable_recovery:
         return out
     typ = str(rec.get("order_type", "")).strip().upper()
     side = str(rec.get("side", "")).strip().upper()
@@ -876,6 +927,111 @@ def _submit_with_recovery(profile: str, rec: Dict[str, Any], enable_recovery: bo
     else:
         retry["error"] = f"{retry.get('error', 'retry failed')} | canceled {canceled} open SELL order(s) but retry still failed"
     return retry
+
+
+def _extract_order_ids_from_submit(out_sub: Dict[str, Any]) -> List[str]:
+    ids: List[str] = []
+    data = out_sub.get("data", {}) if isinstance(out_sub.get("data"), dict) else {}
+    try:
+        oid = int(data.get("orderId", 0) or 0)
+    except Exception:
+        oid = 0
+    if oid > 0:
+        ids.append(str(oid))
+    reps = data.get("orderReports", [])
+    if isinstance(reps, list):
+        for r in reps:
+            if not isinstance(r, dict):
+                continue
+            try:
+                roid = int(r.get("orderId", 0) or 0)
+            except Exception:
+                roid = 0
+            if roid > 0:
+                ids.append(str(roid))
+    return sorted(set(ids))
+
+
+def _apply_submit_result_to_rec(rec: Dict[str, Any], out_sub: Dict[str, Any]) -> bool:
+    ok = bool(out_sub.get("ok"))
+    rec["last_submit_ts"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    rec["last_submit_ok"] = ok
+    if ok:
+        rec["status"] = "SUBMITTED"
+        rec["reason"] = str(rec.get("reason", "")) + f" | {out_sub.get('recovery_note', 'submitted')}"
+        ids = _extract_order_ids_from_submit(out_sub)
+        if ids:
+            rec["exchange_order_ids"] = ",".join(ids)
+        if str(rec.get("order_type", "")).strip().upper() == "OCO_BRACKET":
+            rec["status"] = "OPEN"
+    else:
+        rec["status"] = "FAILED"
+        rec["reason"] = str(rec.get("reason", "")) + f" | {out_sub.get('error', 'submit failed')}"
+    return ok
+
+
+def _sync_pending_statuses(profile: str) -> Dict[str, Any]:
+    open_out = bridge.list_open_binance_orders(profile_name=profile) if profile else {"ok": False, "orders": []}
+    open_orders = open_out.get("orders", []) if isinstance(open_out.get("orders"), list) else []
+    open_id_set = set()
+    for o in open_orders:
+        if not isinstance(o, dict):
+            continue
+        try:
+            oid = int(o.get("orderId", 0) or 0)
+        except Exception:
+            oid = 0
+        if oid > 0:
+            open_id_set.add(str(oid))
+
+    led_df = st.session_state.last_ledger_df if isinstance(st.session_state.last_ledger_df, pd.DataFrame) else pd.DataFrame()
+    if led_df.empty:
+        led_out = bridge.get_trade_ledger()
+        if led_out.get("ok"):
+            ledger = led_out.get("ledger", {}) if isinstance(led_out.get("ledger"), dict) else {}
+            entries = ledger.get("entries", []) if isinstance(ledger.get("entries"), list) else []
+            led_df = pd.DataFrame(entries)
+            st.session_state.last_ledger_df = led_df
+    fills_by_sym_side = set()
+    if isinstance(led_df, pd.DataFrame) and not led_df.empty:
+        rows = led_df.to_dict(orient="records")
+        confirmed = _confirmed_execution_rows(rows)
+        for r in confirmed:
+            sym = str(r.get("symbol", "")).strip().upper()
+            side = str(r.get("action", "")).strip().upper()
+            if sym and side in ("BUY", "SELL"):
+                fills_by_sym_side.add((sym, side))
+
+    updated = 0
+    for rec in st.session_state.pending_recs:
+        if not isinstance(rec, dict):
+            continue
+        cur = str(rec.get("status", "PENDING") or "PENDING").strip().upper()
+        sym = str(rec.get("symbol", "")).strip().upper()
+        side = str(rec.get("side", "")).strip().upper()
+        ids_raw = str(rec.get("exchange_order_ids", "") or "").strip()
+        ids = [x.strip() for x in ids_raw.split(",") if x.strip()]
+        if not ids:
+            if cur in ("FAILED", "BLOCKED", "FILLED", "CANCELED", "EXPIRED"):
+                continue
+            if cur not in ("PENDING",):
+                rec["status"] = "PENDING"
+                updated += 1
+            continue
+        if any(i in open_id_set for i in ids):
+            if cur != "OPEN":
+                rec["status"] = "OPEN"
+                updated += 1
+            continue
+        if (sym, side) in fills_by_sym_side:
+            if cur != "FILLED":
+                rec["status"] = "FILLED"
+                updated += 1
+            continue
+        if cur not in ("FAILED", "BLOCKED", "FILLED", "CANCELED", "EXPIRED"):
+            rec["status"] = "SUBMITTED"
+            updated += 1
+    return {"ok": True, "updated": updated, "open_orders": len(open_orders)}
 
 
 def _load_binance_profiles() -> List[str]:
@@ -1014,6 +1170,23 @@ def _get_asset_total_balance(profile: str, asset: str) -> float:
     return 0.0
 
 
+def _get_asset_free_balance(profile: str, asset: str) -> float:
+    out = bridge.fetch_binance_portfolio(profile_name=profile)
+    if not out.get("ok"):
+        return 0.0
+    a = str(asset or "").strip().upper()
+    for b in (out.get("balances", []) or []):
+        if not isinstance(b, dict):
+            continue
+        if str(b.get("asset", "")).strip().upper() != a:
+            continue
+        try:
+            return float(b.get("free", 0.0) or 0.0)
+        except Exception:
+            return 0.0
+    return 0.0
+
+
 def _apply_signal_controls(
     recs: List[Dict[str, Any]],
     profile: str,
@@ -1025,6 +1198,7 @@ def _apply_signal_controls(
     apply_protection: bool,
     stop_loss_pct: float,
     take_profit_pct: float,
+    post_buy_protection_mode: str = "none",
 ) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     quote = str(quote_asset or "USDT").strip().upper() or "USDT"
@@ -1049,6 +1223,12 @@ def _apply_signal_controls(
                 rr["reason"] = str(rr.get("reason", "")) + " | OCO override ignored for BUY; using MARKET"
             else:
                 rr["order_type"] = order_type_policy
+        eff_order_type = str(rr.get("order_type", "") or "").strip().upper()
+        force_protection = bool(
+            apply_protection
+            or eff_order_type == "OCO_BRACKET"
+            or str(post_buy_protection_mode or "none").strip().lower() == "oco"
+        )
 
         px = 0.0
         lp = bridge.get_binance_last_price(symbol=sym, profile_name=profile) if profile and sym else {"ok": False}
@@ -1078,11 +1258,18 @@ def _apply_signal_controls(
                 rr["quote_notional"] = round(qn, 8)
                 rr["quantity"] = 0.0
                 rr["reason"] = str(rr.get("reason", "")) + f" | autosized BUY using {rr['quote_notional']} {quote}"
-            if apply_protection and px > 0:
+            if force_protection and px > 0:
                 if float(rr.get("stop_loss_price", 0.0) or 0.0) <= 0:
                     rr["stop_loss_price"] = px * (1.0 - max(0.0, float(stop_loss_pct or 0.0)) / 100.0)
                 if float(rr.get("take_profit_price", 0.0) or 0.0) <= 0:
                     rr["take_profit_price"] = px * (1.0 + max(0.0, float(take_profit_pct or 0.0)) / 100.0)
+            rr["post_buy_protection_mode"] = str(post_buy_protection_mode or "none").strip().lower()
+            if str(rr.get("post_buy_protection_mode", "none")).lower() == "oco":
+                sl_b = float(rr.get("stop_loss_price", 0.0) or 0.0)
+                tp_b = float(rr.get("take_profit_price", 0.0) or 0.0)
+                if sl_b <= 0 or tp_b <= 0:
+                    _log(f"Dropped BUY {sym}: post-BUY OCO selected but SL/TP unavailable.")
+                    continue
         elif side == "SELL":
             held_total = _get_asset_total_balance(profile, asset) if profile else 0.0
             if profile and held_total <= 0:
@@ -1101,7 +1288,7 @@ def _apply_signal_controls(
             else:
                 _log(f"Dropped SELL {sym}: computed quantity is zero")
                 continue
-            if apply_protection and px > 0:
+            if force_protection and px > 0:
                 if float(rr.get("stop_loss_price", 0.0) or 0.0) <= 0:
                     rr["stop_loss_price"] = px * (1.0 - max(0.0, float(stop_loss_pct or 0.0)) / 100.0)
                 if float(rr.get("take_profit_price", 0.0) or 0.0) <= 0:
@@ -1113,6 +1300,9 @@ def _apply_signal_controls(
             if sl > 0 and tp > 0:
                 rr["limit_price"] = float(rr.get("limit_price", 0.0) or 0.0) or (sl * 0.999)
                 rr["take_profit_limit_price"] = float(rr.get("take_profit_limit_price", 0.0) or 0.0) or (tp * 0.999)
+            else:
+                _log(f"Dropped {side} {sym}: OCO requires both SL and TP.")
+                continue
         out.append(rr)
     return out
 
@@ -1721,11 +1911,7 @@ def _protect_open_positions_simple(profile: str, auto_submit: bool = False) -> D
             if str(rec.get("pending_source", "")).strip().lower() != "protect_open_positions_ai_bt":
                 continue
             out_sub = _submit_with_recovery(profile, rec, enable_recovery=bool(st.session_state.get("auto_retry_locked_sell", True)))
-            rec["status"] = "SUBMITTED" if out_sub.get("ok") else "FAILED"
-            rec["reason"] = str(rec.get("reason", "")) + (
-                f" | {out_sub.get('recovery_note', 'submitted')}" if out_sub.get("ok") else f" | {out_sub.get('error', 'submit failed')}"
-            )
-            if out_sub.get("ok"):
+            if _apply_submit_result_to_rec(rec, out_sub):
                 submitted += 1
     return {"ok": True, "staged": added, "submitted": submitted, "rows": len(rows)}
 
@@ -1836,11 +2022,7 @@ def _protect_open_positions_live_bt_ai(profile: str, auto_submit: bool = False, 
             if str(rec.get("pending_source", "")).strip().lower() != "protect_open_positions_live_bt_ai":
                 continue
             out_sub = _submit_with_recovery(profile, rec, enable_recovery=bool(st.session_state.get("auto_retry_locked_sell", True)))
-            rec["status"] = "SUBMITTED" if out_sub.get("ok") else "FAILED"
-            rec["reason"] = str(rec.get("reason", "")) + (
-                f" | {out_sub.get('recovery_note', 'submitted')}" if out_sub.get("ok") else f" | {out_sub.get('error', 'submit failed')}"
-            )
-            if out_sub.get("ok"):
+            if _apply_submit_result_to_rec(rec, out_sub):
                 submitted += 1
     return {"ok": True, "staged": added, "submitted": submitted, "rows": len(review_rows), "mode": "live_bt_ai"}
 
@@ -2162,9 +2344,18 @@ with tab_ai:
         signal_pct_balance = float(sc6.number_input("% of quote balance", min_value=0.0, max_value=100.0, value=30.0, step=1.0, key="sig_pct_balance"))
         signal_protect = bool(sc7.checkbox("Add default SL/TP", value=True, key="sig_add_protect"))
         signal_auto_submit = bool(sc8.checkbox("Auto-submit after stage", value=False, key="sig_auto_submit"))
-        sc9, sc10 = st.columns(2)
+        sc9, sc10, sc11 = st.columns(3)
         signal_sl_pct = float(sc9.number_input("Default stop-loss %", min_value=0.1, max_value=80.0, value=5.0, step=0.5, key="sig_sl_pct"))
         signal_tp_pct = float(sc10.number_input("Default take-profit %", min_value=0.1, max_value=300.0, value=10.0, step=1.0, key="sig_tp_pct"))
+        signal_post_buy_mode = str(
+            sc11.selectbox(
+                "Post-BUY protection",
+                ["none", "oco"],
+                index=0,
+                key="sig_post_buy_mode",
+                help="none = no automatic bracket after buy; oco = submit SELL OCO after buy fill using SL/TP values.",
+            )
+        )
     if ai_cols[1].button("Set Active") and ai_profile:
         out_set = _run_task("AI Set Active", lambda: bridge.set_active_ai_profile(ai_profile))
         if out_set.get("ok"):
@@ -2187,6 +2378,7 @@ with tab_ai:
                 apply_protection=bool(signal_protect),
                 stop_loss_pct=float(signal_sl_pct or 0.0),
                 take_profit_pct=float(signal_tp_pct or 0.0),
+                post_buy_protection_mode=signal_post_buy_mode,
             )
             seq0 = int(st.session_state.pending_rec_seq or 0)
             n = _append_pending(recs, source="ai_interpretation")
@@ -2199,11 +2391,7 @@ with tab_ai:
                     if int(rec.get("id", -1)) not in new_ids:
                         continue
                     out_sub = _submit_with_recovery(str(signal_profile), rec, enable_recovery=bool(st.session_state.get("auto_retry_locked_sell", True)))
-                    rec["status"] = "SUBMITTED" if out_sub.get("ok") else "FAILED"
-                    rec["reason"] = str(rec.get("reason", "")) + (
-                        f" | {out_sub.get('recovery_note', 'submitted')}" if out_sub.get("ok") else f" | {out_sub.get('error', 'submit failed')}"
-                    )
-                    if out_sub.get("ok"):
+                    if _apply_submit_result_to_rec(rec, out_sub):
                         ok_n += 1
                     else:
                         fail_n += 1
@@ -2332,6 +2520,7 @@ with tab_ai:
                 "signal_protect": bool(signal_protect),
                 "signal_sl_pct": float(signal_sl_pct or 0.0),
                 "signal_tp_pct": float(signal_tp_pct or 0.0),
+                "signal_post_buy_mode": str(signal_post_buy_mode or "none"),
                 "default_tf": str(st.session_state.get("bt_tf", "4h")),
             }
             jobs[jid] = j
@@ -2380,6 +2569,7 @@ with tab_ai:
                         apply_protection=bool(meta.get("signal_protect", False)),
                         stop_loss_pct=float(meta.get("signal_sl_pct", 0.0) or 0.0),
                         take_profit_pct=float(meta.get("signal_tp_pct", 0.0) or 0.0),
+                        post_buy_protection_mode=str(meta.get("signal_post_buy_mode", "none") or "none"),
                     )
                     if recs:
                         seq0 = int(st.session_state.pending_rec_seq or 0)
@@ -2396,11 +2586,7 @@ with tab_ai:
                                     if int(rec.get("id", -1)) not in new_ids:
                                         continue
                                     out_sub = _submit_with_recovery(prof, rec, enable_recovery=bool(st.session_state.get("auto_retry_locked_sell", True)))
-                                    rec["status"] = "SUBMITTED" if out_sub.get("ok") else "FAILED"
-                                    rec["reason"] = str(rec.get("reason", "")) + (
-                                        f" | {out_sub.get('recovery_note', 'submitted')}" if out_sub.get("ok") else f" | {out_sub.get('error', 'submit failed')}"
-                                    )
-                                    if out_sub.get("ok"):
+                                    if _apply_submit_result_to_rec(rec, out_sub):
                                         ok_n += 1
                                     else:
                                         fail_n += 1
@@ -2511,6 +2697,29 @@ with tab_portfolio:
     )
     do_unified = pcols[4].button("Unified Cycle (Manage + Discover)", disabled=not bool(profile))
     do_prune = st.button("Prune Signal History")
+    uctl = st.columns(2)
+    unified_signal_order_type = uctl[0].selectbox(
+        "Unified new-entry order type",
+        ["as_ai", "MARKET", "LIMIT", "STOP_LOSS_LIMIT", "TAKE_PROFIT_LIMIT", "OCO_BRACKET"],
+        index=max(
+            0,
+            ["as_ai", "MARKET", "LIMIT", "STOP_LOSS_LIMIT", "TAKE_PROFIT_LIMIT", "OCO_BRACKET"].index(
+                str(st.session_state.get("unified_signal_order_type", "as_ai") or "as_ai")
+            ),
+        )
+        if str(st.session_state.get("unified_signal_order_type", "as_ai") or "as_ai")
+        in ["as_ai", "MARKET", "LIMIT", "STOP_LOSS_LIMIT", "TAKE_PROFIT_LIMIT", "OCO_BRACKET"]
+        else 0,
+        key="unified_signal_order_type",
+        help="Controls order type applied to Unified Cycle new-entry recommendations.",
+    )
+    unified_post_buy_mode = uctl[1].selectbox(
+        "Unified BUY follow-up protection",
+        ["none", "oco"],
+        index=0 if str(st.session_state.get("unified_post_buy_mode", "none") or "none") == "none" else 1,
+        key="unified_post_buy_mode",
+        help="none = plain BUY only; oco = after BUY fill, submit SELL OCO using configured/default SL/TP.",
+    )
     live_profiles_for_protect = _load_live_profiles()
     live_profile_names_for_protect = sorted(live_profiles_for_protect.keys()) if isinstance(live_profiles_for_protect, dict) else []
     protect_live_profile_pick = st.selectbox(
@@ -2523,6 +2732,9 @@ with tab_portfolio:
         st.info("Protect behavior: Stage + Auto-submit to Binance.")
     else:
         st.info("Protect behavior: Stage only (manual review and submit from Pending Recommendations).")
+    st.caption(
+        f"Unified new-entry behavior: order type `{str(unified_signal_order_type)}` | BUY follow-up `{str(unified_post_buy_mode)}`"
+    )
 
     if do_pf and profile:
         out = _run_task("Portfolio Refresh", lambda: bridge.fetch_binance_portfolio(profile_name=profile))
@@ -2548,6 +2760,7 @@ with tab_portfolio:
                 _show_df(df, width="stretch", hide_index=True)
             else:
                 st.info("No open orders.")
+            _sync_pending_statuses(profile)
 
     if do_led:
         out = _run_task("Ledger Refresh", lambda: bridge.get_trade_ledger())
@@ -2577,6 +2790,7 @@ with tab_portfolio:
             out = _run_task("Reconcile Fills", lambda: bridge.reconcile_binance_fills(profile_name=profile, symbols=syms))
         if out.get("ok"):
             st.success(f"Reconcile added={int(out.get('added', 0) or 0)}, dup={int(out.get('duplicates', 0) or 0)}")
+            _sync_pending_statuses(profile)
         else:
             st.error(out.get("error", "Reconcile failed"))
     if do_review and profile:
@@ -2619,6 +2833,8 @@ with tab_portfolio:
                 auto_send_protect=asp,
                 auto_submit_new=asn,
                 dt_context=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                signal_order_type=str(unified_signal_order_type or "as_ai"),
+                post_buy_protection_mode=str(unified_post_buy_mode or "none"),
             ),
         )
         if out.get("ok"):
@@ -2657,6 +2873,8 @@ with tab_portfolio:
         st.session_state.unified_monitor_live_profile = picked_lp
         st.session_state.unified_monitor_auto_send_protect = bool(auto_send_protect)
         st.session_state.unified_monitor_auto_submit_new = bool(auto_submit_unified_new)
+        st.session_state.unified_monitor_signal_order_type = str(unified_signal_order_type or "as_ai")
+        st.session_state.unified_monitor_post_buy_mode = str(unified_post_buy_mode or "none")
         st.success("Unified Monitor started.")
         st.rerun()
     if stop_unified:
@@ -2667,8 +2885,13 @@ with tab_portfolio:
     um_on = bool(st.session_state.get("unified_monitor_enabled", False))
     um_busy = bool(st.session_state.get("unified_monitor_busy", False))
     um_next = float(st.session_state.get("unified_monitor_next_epoch", 0.0) or 0.0)
-    um_next_txt = datetime.fromtimestamp(um_next).strftime("%Y-%m-%d %H:%M:%S") if um_next > 0 else "-"
-    um5.caption(f"Status: {'RUNNING' if um_busy else ('ACTIVE' if um_on else 'OFF')} | Next run: {um_next_txt}")
+    um_started = float(st.session_state.get("unified_monitor_started_epoch", 0.0) or 0.0)
+    if um_busy:
+        elapsed = max(0.0, time.time() - um_started) if um_started > 0 else 0.0
+        um5.caption(f"Status: RUNNING ({elapsed:.1f}s) | Next run: after current cycle completes")
+    else:
+        um_next_txt = datetime.fromtimestamp(um_next).strftime("%Y-%m-%d %H:%M:%S") if um_next > 0 else "-"
+        um5.caption(f"Status: {'ACTIVE' if um_on else 'OFF'} | Next run: {um_next_txt}")
     um_last = str(st.session_state.get("unified_monitor_last_summary", "") or "").strip()
     if um_last:
         st.caption(f"Last run: {um_last}")
@@ -2694,6 +2917,7 @@ with tab_portfolio:
         if not prof:
             return
         st.session_state.unified_monitor_busy = True
+        st.session_state.unified_monitor_started_epoch = time.time()
         try:
             out = _run_task(
                 "Unified Cycle (scheduled)",
@@ -2703,6 +2927,8 @@ with tab_portfolio:
                     auto_send_protect=bool(st.session_state.get("unified_monitor_auto_send_protect", False)),
                     auto_submit_new=bool(st.session_state.get("unified_monitor_auto_submit_new", False)),
                     dt_context=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    signal_order_type=str(st.session_state.get("unified_monitor_signal_order_type", "as_ai") or "as_ai"),
+                    post_buy_protection_mode=str(st.session_state.get("unified_monitor_post_buy_mode", "none") or "none"),
                 ),
             )
             if out.get("ok"):
@@ -2751,6 +2977,7 @@ with tab_portfolio:
             st.session_state.unified_monitor_last_epoch = time.time()
             st.session_state.unified_monitor_next_epoch = time.time() + (max(5, int(st.session_state.get("unified_monitor_interval_min", 30) or 30)) * 60)
             st.session_state.unified_monitor_busy = False
+            st.session_state.unified_monitor_started_epoch = 0.0
         st.rerun()
 
     _unified_monitor_fragment()
@@ -2769,9 +2996,12 @@ with tab_portfolio:
     if not pdf.empty:
         _show_df(pdf, width="stretch", hide_index=True)
         all_ids = [int(x) for x in pdf["id"].tolist()]
-        selected = st.multiselect("Select pending IDs", options=all_ids, default=st.session_state.selected_pending_ids)
+        _all_id_set = set(all_ids)
+        _raw_selected = st.session_state.selected_pending_ids if isinstance(st.session_state.selected_pending_ids, list) else []
+        _selected_defaults = [int(x) for x in _raw_selected if str(x).strip().isdigit() and int(x) in _all_id_set]
+        selected = st.multiselect("Select pending IDs", options=all_ids, default=_selected_defaults)
         st.session_state.selected_pending_ids = selected
-        pc = st.columns(4)
+        pc = st.columns(5)
         if pc[0].button("Submit Selected", disabled=not bool(profile)):
             ok_n = 0
             fail_n = 0
@@ -2780,14 +3010,12 @@ with tab_portfolio:
                 if not rec:
                     continue
                 out_sub = _submit_with_recovery(profile, rec, enable_recovery=bool(st.session_state.get("auto_retry_locked_sell", True)))
-                rec["status"] = "SUBMITTED" if out_sub.get("ok") else "FAILED"
-                rec["reason"] = str(rec.get("reason", "")) + (
-                    f" | {out_sub.get('recovery_note', 'submitted')}" if out_sub.get("ok") else f" | {out_sub.get('error', 'submit failed')}"
-                )
-                if out_sub.get("ok"):
+                if _apply_submit_result_to_rec(rec, out_sub):
                     ok_n += 1
                 else:
                     fail_n += 1
+            if profile:
+                _sync_pending_statuses(profile)
             st.success(f"Submitted={ok_n}, failed={fail_n}")
         if pc[1].button("Remove Selected"):
             ids = set(int(x) for x in selected)
@@ -2799,6 +3027,12 @@ with tab_portfolio:
             st.success("Pending cleared.")
         if pc[3].button("Download Pending CSV"):
             st.download_button("Save pending.csv", data=pdf.to_csv(index=False), file_name="pending_recommendations.csv", mime="text/csv")
+        if pc[4].button("Sync Pending Status", disabled=not bool(profile)):
+            sout = _sync_pending_statuses(profile)
+            if sout.get("ok"):
+                st.success(f"Pending sync updated={int(sout.get('updated', 0) or 0)}, open_orders={int(sout.get('open_orders', 0) or 0)}")
+            else:
+                st.error(str(sout.get("error", "Pending sync failed")))
     else:
         st.info("No pending recommendations.")
     st.markdown("### Cached Views")

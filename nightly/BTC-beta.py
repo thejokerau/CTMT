@@ -230,27 +230,34 @@ TASKS — perform ALL of them in order:
      BEGIN_STRATA_TRADE_PLAN_JSON
      { ...json... }
      END_STRATA_TRADE_PLAN_JSON
-   - JSON schema:
-     {
-       "schema_version": "1.0",
-       "generated_at": "<ISO8601 UTC>",
-       "timeframe": "<1d|4h|8h|12h>",
-       "risk_mode": "<defensive|opportunistic|aggressive|wait>",
-       "trades": [
-         {
-           "symbol": "BTCUSDT",
-           "asset": "BTC",
-           "side": "BUY",
-           "order_type": "MARKET",
-           "quantity": 0.0,
-           "confidence": "0-100",
-           "timeframe": "<1d|4h|8h|12h>",
-           "reason": "short explanation",
-           "invalidation": "condition/level"
-         }
-       ]
-     }
-   - Do not include non-JSON text between the BEGIN/END markers.
+    - JSON schema:
+      {
+        "schema_version": "1.0",
+        "generated_at": "<ISO8601 UTC>",
+        "timeframe": "<1d|4h|8h|12h>",
+        "risk_mode": "<defensive|opportunistic|aggressive|wait>",
+        "trades": [
+          {
+            "symbol": "BTCUSDT",
+            "asset": "BTC",
+            "side": "BUY",
+            "order_type": "MARKET",
+            "quantity": 0.0,
+            "quote_notional": 0.0,
+            "stop_loss_price": 0.0,
+            "take_profit_price": 0.0,
+            "limit_price": 0.0,
+            "take_profit_limit_price": 0.0,
+            "confidence": "0-100",
+            "timeframe": "<1d|4h|8h|12h>",
+            "reason": "short explanation",
+            "invalidation": "condition/level"
+          }
+        ]
+      }
+    - For every BUY or SELL trade, ALWAYS include numeric stop_loss_price and take_profit_price (> 0).
+    - If unsure, infer them from risk context; do not leave stop_loss_price or take_profit_price empty/zero.
+    - Do not include non-JSON text between the BEGIN/END markers.
 
 OUTPUT FORMAT — strictly follow this structure with clean headings and bullet points. Use markdown tables only when helpful. Be concise yet insightful. Always end with:
 
