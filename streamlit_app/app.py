@@ -1,6 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import json
 import re
@@ -223,13 +223,169 @@ def _run_full_pipeline_sync(live_cfg: Dict[str, Any], bt_cfg: Dict[str, Any], dt
     }
 
 
+def _run_unified_cycle_sync(
+    profile: str,
+    live_profile_name: str = "",
+    auto_send_protect: bool = False,
+    auto_submit_new: bool = False,
+    dt_context: str = "",
+    signal_order_type: str = "as_ai",
+    post_buy_protection_mode: str = "none",
+    ai_only_oco_values: bool = False,
+) -> Dict[str, Any]:
+    # Preflight: refresh exchange state so protection/discovery runs on latest fills/orders.
+    try:
+        qpref = str(st.session_state.get("sig_quote", st.session_state.get("live_quote", "USDT")) or "USDT").strip().upper() or "USDT"
+        syms = _portfolio_symbols_for_profile(profile=profile, quote_pref=qpref)
+        if syms:
+            bridge.reconcile_binance_fills(profile_name=profile, symbols=syms)
+        bridge.list_open_binance_orders(profile_name=profile)
+        _sync_pending_statuses(profile)
+    except Exception as ex:
+        _log(f"Unified preflight warning: {ex}")
+
+    # 1) Manage existing positions.
+    protect_out = _protect_open_positions_live_bt_ai(
+        profile=profile,
+        auto_submit=bool(auto_send_protect),
+        live_profile_name=live_profile_name,
+    )
+    if not protect_out.get("ok"):
+        return {"ok": False, "stage": "protect", "error": str(protect_out.get("error", "Protection failed"))}
+
+    # 2) Discover new opportunities (Live -> BT -> AI -> Stage).
+    live_cfg = _build_live_cfg_from_state_or_profile(profile_name=live_profile_name)
+    bt_cfg = {
+        "market": str(st.session_state.get("bt_market", "crypto")),
+        "timeframe": str(st.session_state.get("bt_tf", "1d")),
+        "top_n": int(st.session_state.get("bt_topn", 20)),
+        "months": int(st.session_state.get("bt_months", 12)),
+        "country": "2",
+        "quote_currency": str(st.session_state.get("live_quote", "USDT")),
+        "display_currency": "USD",
+        "initial_capital": 10000.0,
+        "stop_loss_pct": 8.0,
+        "take_profit_pct": 20.0,
+        "max_hold_days": 45,
+        "min_hold_bars": 2,
+        "cooldown_bars": 1,
+        "same_asset_cooldown_bars": 3,
+        "max_consecutive_same_asset_entries": 3,
+        "fee_pct": 0.1,
+        "slippage_pct": 0.05,
+        "position_size": 0.30,
+        "atr_multiplier": 2.2,
+        "adx_threshold": 25.0,
+        "cmf_threshold": 0.02,
+        "obv_slope_threshold": 0.0,
+        "buy_threshold": 2,
+        "sell_threshold": -2,
+        "cache_workers": 4,
+        "max_drawdown_limit_pct": 35.0,
+        "max_exposure_pct": 0.4,
+        "auto_tune": False,
+        "optuna_trials": 10,
+        "optuna_jobs": 2,
+    }
+    pipe_out = _run_full_pipeline_sync(live_cfg=live_cfg, bt_cfg=bt_cfg, dt_context=(dt_context or datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    if not pipe_out.get("ok"):
+        return {
+            "ok": False,
+            "stage": "pipeline",
+            "error": str(pipe_out.get("error", "Pipeline failed")),
+            "protect": protect_out,
+        }
+
+    live_block = str(pipe_out.get("live_block", "") or "")
+    bt_summary = str(pipe_out.get("bt_summary", "") or "")
+    bt_trades = str(pipe_out.get("bt_trades", "") or "")
+    ai_response = str(pipe_out.get("ai_response", "") or "")
+
+    # Keep shared visible outputs in sync.
+    st.session_state.live_runs.append(
+        {"name": _build_live_cfg_from_state_or_profile(profile_name=live_profile_name).get("name", "unified-live"), "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "text": live_block}
+    )
+    st.session_state.live_runs = st.session_state.live_runs[-20:]
+    st.session_state.last_live_text = live_block
+    st.session_state.last_backtest_summary = bt_summary
+    st.session_state.last_backtest_trades = bt_trades
+    st.session_state.pending_ai_source_text = "\n\n".join([live_block, bt_summary, bt_trades]).strip()
+    st.session_state.ai_response = ai_response
+
+    # Stage recommendations as "new opportunities".
+    default_tf = str(st.session_state.get("bt_tf", "4h"))
+    recs_raw = _extract_trade_recs(ai_response, default_tf=default_tf)
+    recs_raw_n = len(recs_raw) if isinstance(recs_raw, list) else 0
+    recs = recs_raw
+    recs = _apply_signal_controls(
+        recs=recs,
+        profile=str(st.session_state.get("sig_exec_profile", profile) or profile),
+        quote_asset=str(st.session_state.get("sig_quote", "USDT") or "USDT"),
+        order_type_policy=str(signal_order_type or "as_ai"),
+        autosize_mode=str(st.session_state.get("sig_autosize", "none") or "none"),
+        fixed_quote_notional=float(st.session_state.get("sig_fixed_notional", 0.0) or 0.0),
+        pct_quote_balance=float(st.session_state.get("sig_pct_balance", 0.0) or 0.0),
+        apply_protection=bool(st.session_state.get("sig_add_protect", False)),
+        stop_loss_pct=float(st.session_state.get("sig_sl_pct", 0.0) or 0.0),
+        take_profit_pct=float(st.session_state.get("sig_tp_pct", 0.0) or 0.0),
+        post_buy_protection_mode=str(post_buy_protection_mode or "none"),
+        ai_only_oco_values=bool(ai_only_oco_values),
+    )
+    staged = 0
+    submitted = 0
+    failed = 0
+    recs_after_controls = len(recs) if isinstance(recs, list) else 0
+    no_new_reason = ""
+    if recs:
+        seq0 = int(st.session_state.pending_rec_seq or 0)
+        staged = _append_pending(recs, source="unified_new_opportunity")
+        if auto_submit_new and staged > 0:
+            new_ids = set(range(seq0 + 1, seq0 + staged + 1))
+            for rec in st.session_state.pending_recs:
+                if int(rec.get("id", -1)) not in new_ids:
+                    continue
+                out_sub = _submit_with_recovery(profile, rec, enable_recovery=bool(st.session_state.get("auto_retry_locked_sell", True)))
+                if _apply_submit_result_to_rec(rec, out_sub):
+                    submitted += 1
+                else:
+                    failed += 1
+    else:
+        if recs_raw_n <= 0:
+            no_new_reason = "AI returned no structured recommendations."
+        else:
+            no_new_reason = "Recommendations were filtered by controls/portfolio constraints."
+
+    summary_text = (
+        f"protect(staged={int(protect_out.get('staged', 0) or 0)}, submitted={int(protect_out.get('submitted', 0) or 0)}), "
+        f"new(parsed={int(recs_raw_n)}, eligible={int(recs_after_controls)}, staged={int(staged)}, submitted={int(submitted)}, failed={int(failed)})"
+    )
+    if no_new_reason:
+        summary_text += f" | note: {no_new_reason}"
+
+    return {
+        "ok": True,
+        "mode": "unified_manage_and_discover",
+        "protect_staged": int(protect_out.get("staged", 0) or 0),
+        "protect_submitted": int(protect_out.get("submitted", 0) or 0),
+        "new_parsed": int(recs_raw_n),
+        "new_eligible": int(recs_after_controls),
+        "new_staged": int(staged),
+        "new_submitted": int(submitted),
+        "new_failed": int(failed),
+        "note": no_new_reason,
+        "summary_text": summary_text,
+    }
+
+
 def _init_state() -> None:
     defaults = {
         "task_logs": [],
         "task_history": [],
         "pending_recs": [],
+        "pending_history": [],
         "pending_rec_seq": 0,
         "ai_source_text": "",
+        "pending_ai_source_text": "",
         "ai_response": "",
         "ai_prompt_preview": "",
         "last_live_text": "",
@@ -249,12 +405,31 @@ def _init_state() -> None:
         "bg_jobs": {},
         "bg_live_running_id": "",
         "bg_pipeline_running_id": "",
+        "bg_unified_running_id": "",
+        "unified_monitor_enabled": False,
+        "unified_monitor_interval_min": 30,
+        "unified_monitor_next_epoch": 0.0,
+        "unified_monitor_last_epoch": 0.0,
+        "unified_monitor_busy": False,
+        "unified_monitor_started_epoch": 0.0,
+        "unified_monitor_live_profile": "",
+        "unified_monitor_auto_send_protect": False,
+        "unified_monitor_auto_submit_new": False,
+        "unified_monitor_signal_order_type": "as_ai",
+        "unified_monitor_post_buy_mode": "none",
+        "unified_monitor_ai_only_oco": False,
+        "unified_monitor_24x7": True,
+        "unified_monitor_last_summary": "",
+        "unified_monitor_history": [],
+        "unified_signal_order_type": "as_ai",
+        "unified_post_buy_mode": "none",
         "pf_last_loaded_epoch": 0.0,
         "pf_last_review_epoch": 0.0,
         "global_prefetch_enabled": True,
         "global_prefetch_sec": 60,
         "auto_retry_locked_sell": True,
-        "graph_auto_refresh": True,
+        "graph_auto_refresh": False,
+        "task_monitor_auto_refresh": False,
         "bg_max_workers": int(EXECUTOR_WORKERS),
         "bg_prefetch_running_id": "",
     }
@@ -605,6 +780,23 @@ def _submit_pending_rec(profile: str, rec: Dict[str, Any]) -> Dict[str, Any]:
     # EngineBridge.submit_binance_order does not support quote_order_qty directly.
     # Convert quote notional to qty using latest price when qty is missing.
     if qty <= 0 and q_notional > 0:
+        filt_out = bridge.get_binance_symbol_filters(symbol=sym, profile_name=profile)
+        min_notional = float(filt_out.get("min_notional", 0.0) or 0.0) if filt_out.get("ok") else 0.0
+        if min_notional > 0 and q_notional < min_notional:
+            q_notional = float(min_notional)
+            rec["quote_notional"] = q_notional
+            rec["reason"] = str(rec.get("reason", "")) + f" | auto-bumped quote notional to minNotional {min_notional:.8f}"
+        if side == "BUY":
+            q_asset = "USDT"
+            for qa in ("USDT", "USDC", "FDUSD", "BUSD", "USD", "BTC", "ETH", "BNB"):
+                if sym.endswith(qa):
+                    q_asset = qa
+                    break
+            free_q = _get_quote_free_balance(profile, q_asset)
+            if free_q <= 0:
+                free_q = _get_quote_free_balance(profile, "USDT")
+            if q_notional > free_q > 0:
+                return {"ok": False, "error": f"Insufficient quote balance for {sym}: required {q_notional:.8f}, available {free_q:.8f}"}
         lp_out = bridge.get_binance_last_price(symbol=sym, profile_name=profile)
         if not lp_out.get("ok"):
             return {"ok": False, "error": f"Unable to derive quantity from quote notional for {sym}: {lp_out.get('error', 'price unavailable')}"}
@@ -639,6 +831,44 @@ def _submit_pending_rec(profile: str, rec: Dict[str, Any]) -> Dict[str, Any]:
         stop_price=stop_arg,
         profile_name=profile,
     )
+
+
+def _try_attach_post_buy_protection(profile: str, rec: Dict[str, Any], submit_out: Dict[str, Any]) -> Dict[str, Any]:
+    side = str(rec.get("side", "")).strip().upper()
+    mode = str(rec.get("post_buy_protection_mode", "none") or "none").strip().lower()
+    if side != "BUY" or mode != "oco":
+        return {"attempted": False}
+    sym = str(rec.get("symbol", "")).strip().upper()
+    if not sym:
+        return {"attempted": False}
+    sl = float(rec.get("stop_loss_price", 0.0) or 0.0)
+    tp = float(rec.get("take_profit_price", 0.0) or 0.0)
+    if sl <= 0 or tp <= 0:
+        return {"attempted": True, "ok": False, "error": "Missing stop/take-profit prices for post-buy OCO."}
+    try:
+        qty = float(submit_out.get("normalized_quantity", rec.get("quantity", 0.0)) or 0.0)
+    except Exception:
+        qty = 0.0
+    # Use free balance as final cap (BUY may consume fees and leave slightly less than submitted qty).
+    m = re.match(r"^([A-Z0-9]+?)(USDT|USDC|FDUSD|BUSD|USD|BTC|ETH|BNB)$", sym)
+    base_asset = m.group(1) if m else str(rec.get("asset", "")).strip().upper()
+    if base_asset:
+        free_qty = _get_asset_free_balance(profile, base_asset)
+        if free_qty > 0:
+            qty = min(qty if qty > 0 else free_qty, free_qty)
+    if qty <= 0:
+        return {"attempted": True, "ok": False, "error": f"No available filled quantity to protect for {sym}."}
+    oco = bridge.submit_binance_oco_sell(
+        symbol=sym,
+        quantity=qty,
+        take_profit_price=tp,
+        stop_price=sl,
+        stop_limit_price=(sl * 0.999),
+        profile_name=profile,
+    )
+    if oco.get("ok"):
+        return {"attempted": True, "ok": True, "qty": qty, "symbol": sym}
+    return {"attempted": True, "ok": False, "error": str(oco.get("error", "post-buy OCO failed"))}
 
 
 def _is_insufficient_balance_error(err: Any) -> bool:
@@ -679,7 +909,16 @@ def _cancel_open_sell_orders_for_symbol(profile: str, symbol: str) -> Dict[str, 
 
 def _submit_with_recovery(profile: str, rec: Dict[str, Any], enable_recovery: bool = True) -> Dict[str, Any]:
     out = _submit_pending_rec(profile, rec)
-    if out.get("ok") or not enable_recovery:
+    if out.get("ok"):
+        prot = _try_attach_post_buy_protection(profile, rec, out)
+        if prot.get("attempted"):
+            out["post_buy_protection"] = prot
+            if prot.get("ok"):
+                out["recovery_note"] = str(out.get("recovery_note", "") or "") + f" | post-buy OCO attached ({prot.get('symbol', '')} qty={float(prot.get('qty', 0.0) or 0.0):.8f})"
+            else:
+                out["recovery_note"] = str(out.get("recovery_note", "") or "") + f" | post-buy OCO not attached: {prot.get('error', 'unknown')}"
+        return out
+    if not enable_recovery:
         return out
     typ = str(rec.get("order_type", "")).strip().upper()
     side = str(rec.get("side", "")).strip().upper()
@@ -703,6 +942,303 @@ def _submit_with_recovery(profile: str, rec: Dict[str, Any], enable_recovery: bo
     else:
         retry["error"] = f"{retry.get('error', 'retry failed')} | canceled {canceled} open SELL order(s) but retry still failed"
     return retry
+
+
+def _extract_order_ids_from_submit(out_sub: Dict[str, Any]) -> List[str]:
+    ids: List[str] = []
+    data = out_sub.get("data", {}) if isinstance(out_sub.get("data"), dict) else {}
+    try:
+        oid = int(data.get("orderId", 0) or 0)
+    except Exception:
+        oid = 0
+    if oid > 0:
+        ids.append(str(oid))
+    reps = data.get("orderReports", [])
+    if isinstance(reps, list):
+        for r in reps:
+            if not isinstance(r, dict):
+                continue
+            try:
+                roid = int(r.get("orderId", 0) or 0)
+            except Exception:
+                roid = 0
+            if roid > 0:
+                ids.append(str(roid))
+    return sorted(set(ids))
+
+
+def _apply_submit_result_to_rec(rec: Dict[str, Any], out_sub: Dict[str, Any]) -> bool:
+    ok = bool(out_sub.get("ok"))
+    rec["last_submit_ts"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    rec["last_submit_ok"] = ok
+    if ok:
+        rec["status"] = "SUBMITTED"
+        rec["reason"] = str(rec.get("reason", "")) + f" | {out_sub.get('recovery_note', 'submitted')}"
+        ids = _extract_order_ids_from_submit(out_sub)
+        if ids:
+            rec["exchange_order_ids"] = ",".join(ids)
+        if str(rec.get("order_type", "")).strip().upper() == "OCO_BRACKET":
+            rec["status"] = "OPEN"
+    else:
+        rec["status"] = "FAILED"
+        rec["reason"] = str(rec.get("reason", "")) + f" | {out_sub.get('error', 'submit failed')}"
+    return ok
+
+
+def _sync_pending_statuses(profile: str) -> Dict[str, Any]:
+    open_out = bridge.list_open_binance_orders(profile_name=profile) if profile else {"ok": False, "orders": []}
+    open_orders = open_out.get("orders", []) if isinstance(open_out.get("orders"), list) else []
+    open_id_set = set()
+    for o in open_orders:
+        if not isinstance(o, dict):
+            continue
+        try:
+            oid = int(o.get("orderId", 0) or 0)
+        except Exception:
+            oid = 0
+        if oid > 0:
+            open_id_set.add(str(oid))
+
+    led_df = st.session_state.last_ledger_df if isinstance(st.session_state.last_ledger_df, pd.DataFrame) else pd.DataFrame()
+    if led_df.empty:
+        led_out = bridge.get_trade_ledger()
+        if led_out.get("ok"):
+            ledger = led_out.get("ledger", {}) if isinstance(led_out.get("ledger"), dict) else {}
+            entries = ledger.get("entries", []) if isinstance(ledger.get("entries"), list) else []
+            led_df = pd.DataFrame(entries)
+            st.session_state.last_ledger_df = led_df
+    fills_by_sym_side = set()
+    if isinstance(led_df, pd.DataFrame) and not led_df.empty:
+        rows = led_df.to_dict(orient="records")
+        confirmed = _confirmed_execution_rows(rows)
+        for r in confirmed:
+            sym = str(r.get("symbol", "")).strip().upper()
+            side = str(r.get("action", "")).strip().upper()
+            if sym and side in ("BUY", "SELL"):
+                fills_by_sym_side.add((sym, side))
+
+    updated = 0
+    for rec in st.session_state.pending_recs:
+        if not isinstance(rec, dict):
+            continue
+        cur = str(rec.get("status", "PENDING") or "PENDING").strip().upper()
+        sym = str(rec.get("symbol", "")).strip().upper()
+        side = str(rec.get("side", "")).strip().upper()
+        ids_raw = str(rec.get("exchange_order_ids", "") or "").strip()
+        ids = [x.strip() for x in ids_raw.split(",") if x.strip()]
+        if not ids:
+            if cur in ("FAILED", "BLOCKED", "FILLED", "CANCELED", "EXPIRED"):
+                continue
+            if cur not in ("PENDING",):
+                rec["status"] = "PENDING"
+                updated += 1
+            continue
+        if any(i in open_id_set for i in ids):
+            if cur != "OPEN":
+                rec["status"] = "OPEN"
+                updated += 1
+            continue
+        if (sym, side) in fills_by_sym_side:
+            if cur != "FILLED":
+                rec["status"] = "FILLED"
+                updated += 1
+            continue
+        if cur not in ("FAILED", "BLOCKED", "FILLED", "CANCELED", "EXPIRED"):
+            rec["status"] = "SUBMITTED"
+            updated += 1
+    return {"ok": True, "updated": updated, "open_orders": len(open_orders)}
+
+
+def _split_symbol_base_quote(symbol: str) -> Tuple[str, str]:
+    sym = str(symbol or "").strip().upper()
+    m = re.match(r"^([A-Z0-9]+?)(USDT|USDC|FDUSD|BUSD|USD|BTC|ETH|BNB)$", sym)
+    if m:
+        return str(m.group(1) or ""), str(m.group(2) or "")
+    return sym, ""
+
+
+def _retrofit_symbol_to_oco(
+    profile: str,
+    symbol: str,
+    stop_loss_pct: float,
+    take_profit_pct: float,
+    replace_existing: bool = True,
+    use_total_qty: bool = True,
+    explicit_stop_price: float = 0.0,
+    explicit_take_profit_price: float = 0.0,
+) -> Dict[str, Any]:
+    sym = str(symbol or "").strip().upper()
+    if not profile:
+        return {"ok": False, "error": "No Binance profile selected."}
+    if not sym:
+        return {"ok": False, "error": "No symbol selected."}
+    base, _ = _split_symbol_base_quote(sym)
+    if not base:
+        return {"ok": False, "error": f"Could not parse base asset from symbol {sym}."}
+
+    if replace_existing:
+        c = _cancel_open_sell_orders_for_symbol(profile, sym)
+        if not c.get("ok"):
+            return {"ok": False, "error": f"Could not cancel existing protection for {sym}: {c.get('error', 'unknown')}"}
+
+    qty = _get_asset_total_balance(profile, base) if use_total_qty else _get_asset_free_balance(profile, base)
+    if qty <= 0:
+        return {"ok": False, "error": f"No available quantity for {sym} to protect."}
+
+    lp = bridge.get_binance_last_price(symbol=sym, profile_name=profile)
+    if not lp.get("ok"):
+        return {"ok": False, "error": f"Could not fetch last price for {sym}: {lp.get('error', 'unknown')}"}
+    try:
+        px = float(lp.get("price", 0.0) or 0.0)
+    except Exception:
+        px = 0.0
+    if px <= 0:
+        return {"ok": False, "error": f"Invalid last price for {sym}."}
+
+    ex_sl = float(explicit_stop_price or 0.0)
+    ex_tp = float(explicit_take_profit_price or 0.0)
+    if ex_sl > 0 and ex_tp > 0:
+        sl = ex_sl
+        tp = ex_tp
+    else:
+        sl_pct = max(0.1, float(stop_loss_pct or 0.0))
+        tp_pct = max(0.1, float(take_profit_pct or 0.0))
+        sl = px * (1.0 - sl_pct / 100.0)
+        tp = px * (1.0 + tp_pct / 100.0)
+
+    oco = bridge.submit_binance_oco_sell(
+        symbol=sym,
+        quantity=float(qty),
+        take_profit_price=float(tp),
+        stop_price=float(sl),
+        stop_limit_price=float(sl * 0.999),
+        profile_name=profile,
+    )
+    if not oco.get("ok"):
+        return {"ok": False, "error": str(oco.get("error", "OCO submit failed")), "symbol": sym, "qty": qty, "stop": sl, "tp": tp}
+    return {
+        "ok": True,
+        "symbol": sym,
+        "qty": float(oco.get("normalized_quantity", qty) or qty),
+        "last_price": px,
+        "stop": float(oco.get("normalized_stop_price", sl) or sl),
+        "tp": float(oco.get("normalized_take_profit_price", tp) or tp),
+    }
+
+
+def _derive_oco_prices_live_bt_ai(
+    profile: str,
+    symbol: str,
+    live_profile_name: str = "",
+    strict_ai_values: bool = False,
+    fallback_stop_pct: float = 5.0,
+    fallback_tp_pct: float = 10.0,
+) -> Dict[str, Any]:
+    sym = str(symbol or "").strip().upper()
+    if not profile or not sym:
+        return {"ok": False, "error": "Missing profile or symbol."}
+    try:
+        live_cfg = _build_live_cfg_from_state_or_profile(profile_name=live_profile_name)
+        live_res = _run_live_cfg_bundle_sync(live_cfg)
+        live_text = str(live_res.get("combined_text", "") or "").strip() if live_res.get("ok") else ""
+    except Exception as ex:
+        live_text = ""
+        _log(f"Retrofit AI live context warning: {ex}")
+
+    bt_cfg = {
+        "market": str(st.session_state.get("bt_market", "crypto")),
+        "timeframe": str(st.session_state.get("bt_tf", "1d")),
+        "top_n": int(st.session_state.get("bt_topn", 20)),
+        "months": int(st.session_state.get("bt_months", 12)),
+        "country": "2",
+        "quote_currency": str(st.session_state.get("live_quote", "USDT")),
+        "display_currency": "USD",
+        "initial_capital": 10000.0,
+        "stop_loss_pct": 8.0,
+        "take_profit_pct": 20.0,
+        "max_hold_days": 45,
+        "min_hold_bars": 2,
+        "cooldown_bars": 1,
+        "same_asset_cooldown_bars": 3,
+        "max_consecutive_same_asset_entries": 3,
+        "fee_pct": 0.1,
+        "slippage_pct": 0.05,
+        "position_size": 0.30,
+        "atr_multiplier": 2.2,
+        "adx_threshold": 25.0,
+        "cmf_threshold": 0.02,
+        "obv_slope_threshold": 0.0,
+        "buy_threshold": 2,
+        "sell_threshold": -2,
+        "cache_workers": 4,
+        "max_drawdown_limit_pct": 35.0,
+        "max_exposure_pct": 0.4,
+        "auto_tune": False,
+        "optuna_trials": 10,
+        "optuna_jobs": 2,
+    }
+    bt_res = bridge.run_backtest(bt_cfg)
+    bt_text = ""
+    if bt_res.get("ok"):
+        bt_text = "\n\n".join([str(bt_res.get("summary_text", "") or ""), str(bt_res.get("trade_text", "") or "")]).strip()
+
+    source = "\n\n".join(
+        [
+            f"TARGET_SYMBOL: {sym}",
+            "Task: produce a protective SELL OCO plan for this open position only.",
+            "Output must include stop_loss_price and take_profit_price in JSON trade fields.",
+            str(live_text),
+            str(bt_text),
+        ]
+    ).strip()
+    ai = bridge.run_ai_analysis(source, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    if not ai.get("ok"):
+        if strict_ai_values:
+            return {"ok": False, "error": str(ai.get("error", "AI failed for OCO derivation"))}
+        return {"ok": True, "fallback": True}
+    recs = _extract_trade_recs(str(ai.get("response", "") or ""), default_tf=str(st.session_state.get("bt_tf", "4h") or "4h"))
+    pick = None
+    for r in recs:
+        if not isinstance(r, dict):
+            continue
+        rs = str(r.get("symbol", "")).strip().upper()
+        if rs != sym:
+            continue
+        sl = float(r.get("stop_loss_price", 0.0) or 0.0)
+        tp = float(r.get("take_profit_price", 0.0) or 0.0)
+        if sl > 0 and tp > 0:
+            pick = {"stop": sl, "tp": tp}
+            break
+    if pick:
+        return {"ok": True, "fallback": False, "stop": float(pick["stop"]), "tp": float(pick["tp"])}
+    if strict_ai_values:
+        return {"ok": False, "error": f"AI did not return SL/TP for {sym}."}
+    return {"ok": True, "fallback": True}
+
+
+def _compact_pending_queue() -> Dict[str, Any]:
+    rows = st.session_state.pending_recs if isinstance(st.session_state.pending_recs, list) else []
+    history = st.session_state.pending_history if isinstance(st.session_state.pending_history, list) else []
+    keep: List[Dict[str, Any]] = []
+    removed = 0
+    terminal = {"OPEN", "FILLED", "CANCELED", "EXPIRED"}
+    for rec in rows:
+        if not isinstance(rec, dict):
+            continue
+        status = str(rec.get("status", "PENDING") or "PENDING").strip().upper()
+        if status in terminal:
+            rr = dict(rec)
+            rr["archived_ts"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            history.append(rr)
+            removed += 1
+        else:
+            keep.append(rec)
+    st.session_state.pending_recs = keep
+    st.session_state.pending_history = history[-1000:]
+    selected = st.session_state.selected_pending_ids if isinstance(st.session_state.selected_pending_ids, list) else []
+    valid_ids = {int(r.get("id", -1)) for r in keep if isinstance(r, dict)}
+    st.session_state.selected_pending_ids = [int(x) for x in selected if str(x).strip().isdigit() and int(x) in valid_ids]
+    return {"ok": True, "removed": removed, "remaining": len(keep)}
 
 
 def _load_binance_profiles() -> List[str]:
@@ -784,9 +1320,18 @@ def _dataframe_column_config(df: pd.DataFrame) -> Dict[str, Any]:
     return cfg
 
 
-def _show_df(df: pd.DataFrame, *, use_container_width: bool = True, hide_index: bool = True, height: Optional[int] = None) -> None:
+def _show_df(
+    df: pd.DataFrame,
+    *,
+    use_container_width: bool = True,
+    hide_index: bool = True,
+    height: Optional[int] = None,
+    width: Optional[str] = None,
+) -> None:
+    if not width:
+        width = "stretch" if bool(use_container_width) else "content"
     kwargs: Dict[str, Any] = {
-        "use_container_width": use_container_width,
+        "width": width,
         "hide_index": hide_index,
     }
     if height is not None:
@@ -832,6 +1377,23 @@ def _get_asset_total_balance(profile: str, asset: str) -> float:
     return 0.0
 
 
+def _get_asset_free_balance(profile: str, asset: str) -> float:
+    out = bridge.fetch_binance_portfolio(profile_name=profile)
+    if not out.get("ok"):
+        return 0.0
+    a = str(asset or "").strip().upper()
+    for b in (out.get("balances", []) or []):
+        if not isinstance(b, dict):
+            continue
+        if str(b.get("asset", "")).strip().upper() != a:
+            continue
+        try:
+            return float(b.get("free", 0.0) or 0.0)
+        except Exception:
+            return 0.0
+    return 0.0
+
+
 def _apply_signal_controls(
     recs: List[Dict[str, Any]],
     profile: str,
@@ -843,6 +1405,8 @@ def _apply_signal_controls(
     apply_protection: bool,
     stop_loss_pct: float,
     take_profit_pct: float,
+    post_buy_protection_mode: str = "none",
+    ai_only_oco_values: bool = False,
 ) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     quote = str(quote_asset or "USDT").strip().upper() or "USDT"
@@ -853,6 +1417,8 @@ def _apply_signal_controls(
         rr = dict(r)
         sym = str(rr.get("symbol", "")).strip().upper()
         side = str(rr.get("side", "BUY")).strip().upper()
+        ai_sl = float(rr.get("stop_loss_price", 0.0) or 0.0)
+        ai_tp = float(rr.get("take_profit_price", 0.0) or 0.0)
         if not sym:
             asset = str(rr.get("asset", "")).strip().upper()
             if asset:
@@ -867,6 +1433,12 @@ def _apply_signal_controls(
                 rr["reason"] = str(rr.get("reason", "")) + " | OCO override ignored for BUY; using MARKET"
             else:
                 rr["order_type"] = order_type_policy
+        eff_order_type = str(rr.get("order_type", "") or "").strip().upper()
+        force_protection = bool(
+            apply_protection
+            or eff_order_type == "OCO_BRACKET"
+            or str(post_buy_protection_mode or "none").strip().lower() == "oco"
+        )
 
         px = 0.0
         lp = bridge.get_binance_last_price(symbol=sym, profile_name=profile) if profile and sym else {"ok": False}
@@ -883,38 +1455,72 @@ def _apply_signal_controls(
             elif autosize_mode == "percent_quote_balance":
                 qn = max(0.0, quote_free * max(0.0, float(pct_quote_balance or 0.0)) / 100.0)
             if qn > 0:
+                if profile and sym:
+                    f = bridge.get_binance_symbol_filters(symbol=sym, profile_name=profile)
+                    min_n = float(f.get("min_notional", 0.0) or 0.0) if f.get("ok") else 0.0
+                    if min_n > 0 and qn < min_n:
+                        if quote_free >= min_n:
+                            qn = float(min_n)
+                            rr["reason"] = str(rr.get("reason", "")) + f" | bumped BUY notional to minNotional {min_n:.8f}"
+                        else:
+                            _log(f"Dropped BUY {sym}: quote balance {quote_free:.8f} below minNotional {min_n:.8f}")
+                            continue
                 rr["quote_notional"] = round(qn, 8)
                 rr["quantity"] = 0.0
                 rr["reason"] = str(rr.get("reason", "")) + f" | autosized BUY using {rr['quote_notional']} {quote}"
-            if apply_protection and px > 0:
-                if float(rr.get("stop_loss_price", 0.0) or 0.0) <= 0:
-                    rr["stop_loss_price"] = px * (1.0 - max(0.0, float(stop_loss_pct or 0.0)) / 100.0)
-                if float(rr.get("take_profit_price", 0.0) or 0.0) <= 0:
-                    rr["take_profit_price"] = px * (1.0 + max(0.0, float(take_profit_pct or 0.0)) / 100.0)
+            if force_protection and px > 0:
+                if not bool(ai_only_oco_values):
+                    if float(rr.get("stop_loss_price", 0.0) or 0.0) <= 0:
+                        rr["stop_loss_price"] = px * (1.0 - max(0.0, float(stop_loss_pct or 0.0)) / 100.0)
+                    if float(rr.get("take_profit_price", 0.0) or 0.0) <= 0:
+                        rr["take_profit_price"] = px * (1.0 + max(0.0, float(take_profit_pct or 0.0)) / 100.0)
+            rr["post_buy_protection_mode"] = str(post_buy_protection_mode or "none").strip().lower()
+            if str(rr.get("post_buy_protection_mode", "none")).lower() == "oco":
+                if bool(ai_only_oco_values) and not (ai_sl > 0 and ai_tp > 0):
+                    _log(f"Dropped BUY {sym}: AI-only OCO mode requires AI-provided SL+TP.")
+                    continue
+                sl_b = float(rr.get("stop_loss_price", 0.0) or 0.0)
+                tp_b = float(rr.get("take_profit_price", 0.0) or 0.0)
+                if sl_b <= 0 or tp_b <= 0:
+                    _log(f"Dropped BUY {sym}: post-BUY OCO selected but SL/TP unavailable.")
+                    continue
         elif side == "SELL":
+            held_total = _get_asset_total_balance(profile, asset) if profile else 0.0
+            if profile and held_total <= 0:
+                _log(f"Dropped SELL {sym}: no holdings in profile {profile}")
+                continue
             qty = float(rr.get("quantity", 0.0) or 0.0)
             if qty <= 0 and profile:
                 if autosize_mode == "percent_quote_balance":
-                    held = _get_asset_total_balance(profile, asset)
-                    qty = held * max(0.0, float(pct_quote_balance or 0.0)) / 100.0
+                    qty = held_total * max(0.0, float(pct_quote_balance or 0.0)) / 100.0
                 elif autosize_mode == "fixed_quote_notional" and px > 0:
-                    qty = max(0.0, float(fixed_quote_notional or 0.0) / px)
+                    qty = min(held_total, max(0.0, float(fixed_quote_notional or 0.0) / px))
                 else:
-                    qty = _get_asset_total_balance(profile, asset)
+                    qty = held_total
             if qty > 0:
                 rr["quantity"] = round(qty, 8)
-            if apply_protection and px > 0:
-                if float(rr.get("stop_loss_price", 0.0) or 0.0) <= 0:
-                    rr["stop_loss_price"] = px * (1.0 - max(0.0, float(stop_loss_pct or 0.0)) / 100.0)
-                if float(rr.get("take_profit_price", 0.0) or 0.0) <= 0:
-                    rr["take_profit_price"] = px * (1.0 + max(0.0, float(take_profit_pct or 0.0)) / 100.0)
+            else:
+                _log(f"Dropped SELL {sym}: computed quantity is zero")
+                continue
+            if force_protection and px > 0:
+                if not bool(ai_only_oco_values):
+                    if float(rr.get("stop_loss_price", 0.0) or 0.0) <= 0:
+                        rr["stop_loss_price"] = px * (1.0 - max(0.0, float(stop_loss_pct or 0.0)) / 100.0)
+                    if float(rr.get("take_profit_price", 0.0) or 0.0) <= 0:
+                        rr["take_profit_price"] = px * (1.0 + max(0.0, float(take_profit_pct or 0.0)) / 100.0)
 
         if str(rr.get("order_type", "")).strip().upper() == "OCO_BRACKET":
+            if bool(ai_only_oco_values) and not (ai_sl > 0 and ai_tp > 0):
+                _log(f"Dropped {side} {sym}: AI-only OCO mode requires AI-provided SL+TP.")
+                continue
             sl = float(rr.get("stop_loss_price", 0.0) or 0.0)
             tp = float(rr.get("take_profit_price", 0.0) or 0.0)
             if sl > 0 and tp > 0:
                 rr["limit_price"] = float(rr.get("limit_price", 0.0) or 0.0) or (sl * 0.999)
                 rr["take_profit_limit_price"] = float(rr.get("take_profit_limit_price", 0.0) or 0.0) or (tp * 0.999)
+            else:
+                _log(f"Dropped {side} {sym}: OCO requires both SL and TP.")
+                continue
         out.append(rr)
     return out
 
@@ -965,6 +1571,12 @@ def _execution_events_from_ledger_df(ledger_df: pd.DataFrame) -> pd.DataFrame:
     d = ledger_df.copy()
     if "is_execution" in d.columns:
         d = d[d["is_execution"] == True]  # noqa: E712
+    # Keep only confirmed exchange fills for FIFO accounting.
+    panel = d.get("panel", "").astype(str).str.strip().str.lower()
+    ex_trade_id = d.get("exchange_trade_id", "").astype(str).str.strip()
+    note = d.get("note", "").astype(str).str.strip().str.lower()
+    confirmed = (panel == "binance_reconcile") | (ex_trade_id != "") | (note.str.contains("reconciled binance fill", na=False))
+    d = d[confirmed]
     d["action"] = d.get("action", "").astype(str).str.upper()
     d = d[d["action"].isin(["BUY", "SELL"])]
     d["qty"] = pd.to_numeric(d.get("qty", 0.0), errors="coerce").fillna(0.0)
@@ -1188,7 +1800,9 @@ def _position_graph_rows(profile: str, quote_pref: str = "USDT") -> pd.DataFrame
             }
 
     pf = bridge.fetch_binance_portfolio(profile_name=profile)
+    pf_ok = bool(pf.get("ok"))
     balances = pf.get("balances", []) if isinstance(pf.get("balances"), list) else []
+    portfolio_qty_by_symbol: Dict[str, float] = {}
     stables = {"USDT", "USDC", "BUSD", "FDUSD", "TUSD", "USDP", "DAI", "USD"}
     for b in balances:
         if not isinstance(b, dict):
@@ -1203,12 +1817,31 @@ def _position_graph_rows(profile: str, quote_pref: str = "USDT") -> pd.DataFrame
         if total <= 0:
             continue
         sym = f"{asset}{quote_pref}"
+        portfolio_qty_by_symbol[sym] = total
         if sym not in merged:
             merged[sym] = {"symbol": sym, "tf": "spot", "qty": total, "buy_price": float(cb.get(sym, 0.0) or 0.0), "quote": quote_pref}
 
     rows: List[Dict[str, Any]] = []
     for sym, r in merged.items():
         qty = float(r.get("qty", 0.0) or 0.0)
+        # Portfolio holdings are the source of truth for current open quantity.
+        if sym in portfolio_qty_by_symbol:
+            qty = float(portfolio_qty_by_symbol.get(sym, 0.0) or 0.0)
+        else:
+            if pf_ok:
+                # When portfolio is available, treat it as source of truth.
+                # Do not surface stale ledger/order-only symbols as open positions.
+                continue
+            # Fallback only when portfolio fetch failed: infer from open SELL order quantity.
+            oq = 0.0
+            for o in by_symbol.get(sym, []):
+                if str(o.get("side", "")).strip().upper() != "SELL":
+                    continue
+                try:
+                    oq = max(oq, float(o.get("origQty", 0.0) or 0.0))
+                except Exception:
+                    pass
+            qty = max(qty, oq)
         if qty <= 0:
             continue
         lp = bridge.get_binance_last_price(symbol=sym, profile_name=profile)
@@ -1312,7 +1945,7 @@ def _render_position_graph_visuals(df: pd.DataFrame) -> None:
             height=320,
             margin=dict(l=20, r=20, t=50, b=20),
         )
-        st.plotly_chart(fig_pnl, use_container_width=True)
+        st.plotly_chart(fig_pnl, width="stretch")
 
     # Protection state donut
     if "state" in dff.columns:
@@ -1327,7 +1960,7 @@ def _render_position_graph_visuals(df: pd.DataFrame) -> None:
             ]
         )
         fig_state.update_layout(title="Protection Coverage", height=320, margin=dict(l=20, r=20, t=50, b=20))
-        st.plotly_chart(fig_state, use_container_width=True)
+        st.plotly_chart(fig_state, width="stretch")
 
     # Relative ladder chart (% move from baseline) avoids mixed-price-scale distortion.
     if all(c in dff.columns for c in ["symbol", "buy_price", "current", "stop", "tp"]):
@@ -1384,7 +2017,7 @@ def _render_position_graph_visuals(df: pd.DataFrame) -> None:
         )
         fig.add_vline(x=0.0, line_width=1, line_dash="dash", line_color="#94a3b8")
         fig.update_yaxes(categoryorder="array", categoryarray=ycats)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 
 def _compute_pnl_breakdown(last_graph_df: pd.DataFrame, ledger_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
@@ -1502,11 +2135,7 @@ def _protect_open_positions_simple(profile: str, auto_submit: bool = False) -> D
             if str(rec.get("pending_source", "")).strip().lower() != "protect_open_positions_ai_bt":
                 continue
             out_sub = _submit_with_recovery(profile, rec, enable_recovery=bool(st.session_state.get("auto_retry_locked_sell", True)))
-            rec["status"] = "SUBMITTED" if out_sub.get("ok") else "FAILED"
-            rec["reason"] = str(rec.get("reason", "")) + (
-                f" | {out_sub.get('recovery_note', 'submitted')}" if out_sub.get("ok") else f" | {out_sub.get('error', 'submit failed')}"
-            )
-            if out_sub.get("ok"):
+            if _apply_submit_result_to_rec(rec, out_sub):
                 submitted += 1
     return {"ok": True, "staged": added, "submitted": submitted, "rows": len(rows)}
 
@@ -1617,11 +2246,7 @@ def _protect_open_positions_live_bt_ai(profile: str, auto_submit: bool = False, 
             if str(rec.get("pending_source", "")).strip().lower() != "protect_open_positions_live_bt_ai":
                 continue
             out_sub = _submit_with_recovery(profile, rec, enable_recovery=bool(st.session_state.get("auto_retry_locked_sell", True)))
-            rec["status"] = "SUBMITTED" if out_sub.get("ok") else "FAILED"
-            rec["reason"] = str(rec.get("reason", "")) + (
-                f" | {out_sub.get('recovery_note', 'submitted')}" if out_sub.get("ok") else f" | {out_sub.get('error', 'submit failed')}"
-            )
-            if out_sub.get("ok"):
+            if _apply_submit_result_to_rec(rec, out_sub):
                 submitted += 1
     return {"ok": True, "staged": added, "submitted": submitted, "rows": len(review_rows), "mode": "live_bt_ai"}
 
@@ -1803,27 +2428,38 @@ with tab_live:
         st.info("Live Dashboard started in background. You can switch tabs while it runs.")
         st.rerun()
 
-    if live_running:
-        st.info("Live Dashboard is running in background...")
-
-    # consume completed live job result
-    live_done_id = str(st.session_state.get("bg_live_running_id", "") or "")
-    if live_done_id:
-        j = (st.session_state.bg_jobs or {}).get(live_done_id, {})
-        if isinstance(j, dict) and str(j.get("status", "")) in ("done", "failed"):
-            if str(j.get("status", "")) == "failed":
-                st.error(f"Live job failed: {j.get('error', 'unknown error')}")
-            else:
-                res = j.get("result", {}) if isinstance(j.get("result"), dict) else {}
-                for e in (res.get("errors", []) or []):
-                    st.warning(str(e))
-                runs = res.get("runs", []) if isinstance(res.get("runs"), list) else []
-                if runs:
-                    st.session_state.live_runs.extend(runs)
-                    st.session_state.live_runs = st.session_state.live_runs[-20:]
-                    st.session_state.last_live_text = str(res.get("combined_text", "") or "")
-                    st.success(f"Live run complete ({len(runs)} panel(s)).")
+    @st.fragment(run_every=("1s" if live_running else None))
+    def _live_job_fragment() -> None:
+        _poll_bg_jobs()
+        _live_id = str(st.session_state.get("bg_live_running_id", "") or "")
+        if not _live_id:
+            return
+        _j = (st.session_state.bg_jobs or {}).get(_live_id, {})
+        if not isinstance(_j, dict):
+            return
+        _status = str(_j.get("status", ""))
+        if _status == "running":
+            st.info("Live Dashboard is running in background...")
+            return
+        if _status == "failed":
+            st.error(f"Live job failed: {_j.get('error', 'unknown error')}")
             st.session_state.bg_live_running_id = ""
+            st.rerun()
+            return
+        if _status == "done":
+            _res = _j.get("result", {}) if isinstance(_j.get("result"), dict) else {}
+            for _e in (_res.get("errors", []) or []):
+                st.warning(str(_e))
+            _runs = _res.get("runs", []) if isinstance(_res.get("runs"), list) else []
+            if _runs:
+                st.session_state.live_runs.extend(_runs)
+                st.session_state.live_runs = st.session_state.live_runs[-20:]
+                st.session_state.last_live_text = str(_res.get("combined_text", "") or "")
+                st.success(f"Live run complete ({len(_runs)} panel(s)).")
+            st.session_state.bg_live_running_id = ""
+            st.rerun()
+
+    _live_job_fragment()
     if st.session_state.live_runs:
         st.markdown("### Latest Live Outputs")
         for run in reversed(st.session_state.live_runs[-6:]):
@@ -1899,6 +2535,12 @@ with tab_backtest:
 
 with tab_ai:
     st.subheader("AI Analysis")
+    _pending_ai_src = str(st.session_state.get("pending_ai_source_text", "") or "").strip()
+    if _pending_ai_src:
+        st.session_state.ai_source_text = _pending_ai_src
+        # This assignment is safe here because the widget is instantiated later in this block.
+        st.session_state.ai_source_text_area = _pending_ai_src
+        st.session_state.pending_ai_source_text = ""
     ai_names, ai_active = _load_ai_profiles()
     ai_cols = st.columns([2, 1, 1, 1])
     ai_profile = _safe_select_option("AI profile", ai_names, preferred=ai_active)
@@ -1907,6 +2549,7 @@ with tab_ai:
         sc1, sc2, sc3, sc4 = st.columns(4)
         bn_names_sig = _load_binance_profiles()
         signal_profile = _safe_select_option("Execution profile", bn_names_sig, preferred=(bn_names_sig[0] if bn_names_sig else ""))
+        st.session_state["sig_exec_profile"] = str(signal_profile or "")
         signal_quote = sc2.selectbox("Quote token", ["USDT", "USDC", "FDUSD", "BUSD", "USTC", "USD"], index=0, key="sig_quote")
         signal_order_type = sc3.selectbox(
             "Order type override",
@@ -1925,9 +2568,26 @@ with tab_ai:
         signal_pct_balance = float(sc6.number_input("% of quote balance", min_value=0.0, max_value=100.0, value=30.0, step=1.0, key="sig_pct_balance"))
         signal_protect = bool(sc7.checkbox("Add default SL/TP", value=True, key="sig_add_protect"))
         signal_auto_submit = bool(sc8.checkbox("Auto-submit after stage", value=False, key="sig_auto_submit"))
-        sc9, sc10 = st.columns(2)
+        sc9, sc10, sc11, sc12 = st.columns(4)
         signal_sl_pct = float(sc9.number_input("Default stop-loss %", min_value=0.1, max_value=80.0, value=5.0, step=0.5, key="sig_sl_pct"))
         signal_tp_pct = float(sc10.number_input("Default take-profit %", min_value=0.1, max_value=300.0, value=10.0, step=1.0, key="sig_tp_pct"))
+        signal_post_buy_mode = str(
+            sc11.selectbox(
+                "Post-BUY protection",
+                ["none", "oco"],
+                index=0,
+                key="sig_post_buy_mode",
+                help="none = no automatic bracket after buy; oco = submit SELL OCO after buy fill using SL/TP values.",
+            )
+        )
+        signal_ai_only_oco = bool(
+            sc12.checkbox(
+                "AI-only OCO values",
+                value=False,
+                key="sig_ai_only_oco",
+                help="When ON, OCO/post-BUY-OCO requires AI-provided SL/TP. No fallback SL/TP auto-fill.",
+            )
+        )
     if ai_cols[1].button("Set Active") and ai_profile:
         out_set = _run_task("AI Set Active", lambda: bridge.set_active_ai_profile(ai_profile))
         if out_set.get("ok"):
@@ -1950,6 +2610,8 @@ with tab_ai:
                 apply_protection=bool(signal_protect),
                 stop_loss_pct=float(signal_sl_pct or 0.0),
                 take_profit_pct=float(signal_tp_pct or 0.0),
+                post_buy_protection_mode=signal_post_buy_mode,
+                ai_only_oco_values=bool(signal_ai_only_oco),
             )
             seq0 = int(st.session_state.pending_rec_seq or 0)
             n = _append_pending(recs, source="ai_interpretation")
@@ -1962,11 +2624,7 @@ with tab_ai:
                     if int(rec.get("id", -1)) not in new_ids:
                         continue
                     out_sub = _submit_with_recovery(str(signal_profile), rec, enable_recovery=bool(st.session_state.get("auto_retry_locked_sell", True)))
-                    rec["status"] = "SUBMITTED" if out_sub.get("ok") else "FAILED"
-                    rec["reason"] = str(rec.get("reason", "")) + (
-                        f" | {out_sub.get('recovery_note', 'submitted')}" if out_sub.get("ok") else f" | {out_sub.get('error', 'submit failed')}"
-                    )
-                    if out_sub.get("ok"):
+                    if _apply_submit_result_to_rec(rec, out_sub):
                         ok_n += 1
                     else:
                         fail_n += 1
@@ -2095,6 +2753,8 @@ with tab_ai:
                 "signal_protect": bool(signal_protect),
                 "signal_sl_pct": float(signal_sl_pct or 0.0),
                 "signal_tp_pct": float(signal_tp_pct or 0.0),
+                "signal_post_buy_mode": str(signal_post_buy_mode or "none"),
+                "signal_ai_only_oco": bool(signal_ai_only_oco),
                 "default_tf": str(st.session_state.get("bt_tf", "4h")),
             }
             jobs[jid] = j
@@ -2143,6 +2803,8 @@ with tab_ai:
                         apply_protection=bool(meta.get("signal_protect", False)),
                         stop_loss_pct=float(meta.get("signal_sl_pct", 0.0) or 0.0),
                         take_profit_pct=float(meta.get("signal_tp_pct", 0.0) or 0.0),
+                        post_buy_protection_mode=str(meta.get("signal_post_buy_mode", "none") or "none"),
+                        ai_only_oco_values=bool(meta.get("signal_ai_only_oco", False)),
                     )
                     if recs:
                         seq0 = int(st.session_state.pending_rec_seq or 0)
@@ -2159,11 +2821,7 @@ with tab_ai:
                                     if int(rec.get("id", -1)) not in new_ids:
                                         continue
                                     out_sub = _submit_with_recovery(prof, rec, enable_recovery=bool(st.session_state.get("auto_retry_locked_sell", True)))
-                                    rec["status"] = "SUBMITTED" if out_sub.get("ok") else "FAILED"
-                                    rec["reason"] = str(rec.get("reason", "")) + (
-                                        f" | {out_sub.get('recovery_note', 'submitted')}" if out_sub.get("ok") else f" | {out_sub.get('error', 'submit failed')}"
-                                    )
-                                    if out_sub.get("ok"):
+                                    if _apply_submit_result_to_rec(rec, out_sub):
                                         ok_n += 1
                                     else:
                                         fail_n += 1
@@ -2227,29 +2885,31 @@ with tab_portfolio:
         or st.session_state.last_ledger_df.empty
     )
     should_auto_bundle = bool(profile) and bool(pf_auto_load) and (need_initial or (now_epoch - last_epoch >= float(pf_auto_refresh_sec)))
-    if pf_force_bundle:
-        out_bundle = _run_task("Portfolio Auto Bundle Refresh", lambda: _refresh_portfolio_bundle(profile, include_review=bool(pf_auto_include_review)))
-        if out_bundle.get("ok"):
-            st.success("Portfolio bundle refreshed.")
+    gp_running_id = str(st.session_state.get("bg_prefetch_running_id", "") or "")
+    gp_running = False
+    if gp_running_id:
+        _jobs = st.session_state.bg_jobs if isinstance(st.session_state.bg_jobs, dict) else {}
+        _j = _jobs.get(gp_running_id, {}) if isinstance(_jobs, dict) else {}
+        gp_running = isinstance(_j, dict) and str(_j.get("status", "")) == "running"
+
+    if pf_force_bundle and bool(profile):
+        if gp_running:
+            st.info("Portfolio refresh already running in background.")
         else:
-            st.warning(
-                "Portfolio bundle refreshed with issues: "
-                + ", ".join(
-                    [
-                        x
-                        for x in [
-                            out_bundle.get("portfolio_error", ""),
-                            out_bundle.get("orders_error", ""),
-                            out_bundle.get("ledger_error", ""),
-                            out_bundle.get("review_error", ""),
-                        ]
-                        if str(x).strip()
-                    ]
-                )
+            jid = _start_bg_job(
+                "Portfolio Auto Bundle Refresh (async)",
+                lambda p=profile, r=bool(pf_auto_include_review): _fetch_portfolio_bundle_payload(profile=p, include_review=r),
             )
-    elif should_auto_bundle:
-        _run_task("Portfolio Auto Bundle Refresh", lambda: _refresh_portfolio_bundle(profile, include_review=bool(pf_auto_include_review)))
-        st.caption("Auto-loaded portfolio, open orders, and ledger.")
+            st.session_state.bg_prefetch_running_id = jid
+            st.info("Portfolio bundle refresh started in background.")
+    elif should_auto_bundle and bool(profile):
+        if not gp_running:
+            jid = _start_bg_job(
+                "Portfolio Auto Bundle Refresh (async)",
+                lambda p=profile, r=bool(pf_auto_include_review): _fetch_portfolio_bundle_payload(profile=p, include_review=r),
+            )
+            st.session_state.bg_prefetch_running_id = jid
+            st.caption("Auto-refresh kicked off in background.")
 
     c1, c2, c3, c4, c5 = st.columns(5)
     do_pf = c1.button("Refresh Portfolio", type="primary", disabled=not bool(profile))
@@ -2257,15 +2917,44 @@ with tab_portfolio:
     do_led = c3.button("Refresh Ledger")
     do_rec = c4.button("Reconcile Fills", disabled=not bool(profile))
     do_review = c5.button("Review Open Positions (MTF)", disabled=not bool(profile))
-    pcols = st.columns(4)
+    pcols = st.columns(5)
     auto_send_protect = pcols[0].checkbox(
-        "Auto-submit protection orders to Binance",
+        "Unified cycle auto-submit protection orders",
         value=False,
-        help="ON: generate protection and submit immediately. OFF: generate protection only and leave as PENDING for manual review/submit.",
+        help="When ON, protection recommendations are submitted to Binance during Unified/Protect runs. When OFF, they are staged as PENDING for manual review.",
     )
     do_protect = pcols[1].button("Protect Open Positions (AI+BT)", disabled=not bool(profile))
     do_protect_pipeline = pcols[2].button("Protect Open Positions (Live > BT > AI)", disabled=not bool(profile))
-    do_prune = pcols[3].button("Prune Signal History")
+    auto_submit_unified_new = pcols[3].checkbox(
+        "Unified cycle auto-submit new entries",
+        value=False,
+        help="When Unified Cycle runs, auto-submit newly discovered opportunity trades.",
+    )
+    do_unified = pcols[4].button("Unified Cycle (Manage + Discover)", disabled=not bool(profile))
+    do_prune = st.button("Prune Signal History")
+    uctl = st.columns(2)
+    unified_signal_order_type = uctl[0].selectbox(
+        "Unified new-entry order type",
+        ["as_ai", "MARKET", "LIMIT", "STOP_LOSS_LIMIT", "TAKE_PROFIT_LIMIT", "OCO_BRACKET"],
+        index=max(
+            0,
+            ["as_ai", "MARKET", "LIMIT", "STOP_LOSS_LIMIT", "TAKE_PROFIT_LIMIT", "OCO_BRACKET"].index(
+                str(st.session_state.get("unified_signal_order_type", "as_ai") or "as_ai")
+            ),
+        )
+        if str(st.session_state.get("unified_signal_order_type", "as_ai") or "as_ai")
+        in ["as_ai", "MARKET", "LIMIT", "STOP_LOSS_LIMIT", "TAKE_PROFIT_LIMIT", "OCO_BRACKET"]
+        else 0,
+        key="unified_signal_order_type",
+        help="Controls order type applied to Unified Cycle new-entry recommendations.",
+    )
+    unified_post_buy_mode = uctl[1].selectbox(
+        "Unified BUY follow-up protection",
+        ["none", "oco"],
+        index=0 if str(st.session_state.get("unified_post_buy_mode", "none") or "none") == "none" else 1,
+        key="unified_post_buy_mode",
+        help="none = plain BUY only; oco = after BUY fill, submit SELL OCO using configured/default SL/TP.",
+    )
     live_profiles_for_protect = _load_live_profiles()
     live_profile_names_for_protect = sorted(live_profiles_for_protect.keys()) if isinstance(live_profiles_for_protect, dict) else []
     protect_live_profile_pick = st.selectbox(
@@ -2278,6 +2967,118 @@ with tab_portfolio:
         st.info("Protect behavior: Stage + Auto-submit to Binance.")
     else:
         st.info("Protect behavior: Stage only (manual review and submit from Pending Recommendations).")
+    st.caption(
+        f"Unified new-entry behavior: order type `{str(unified_signal_order_type)}` | BUY follow-up `{str(unified_post_buy_mode)}`"
+    )
+
+    st.markdown("### Retrofit Selected Position to OCO")
+    rcols = st.columns([2, 1, 1, 2, 2])
+    _retro_syms = _portfolio_symbols_for_profile(profile=profile, quote_pref=str(st.session_state.get("live_quote", "USDT") or "USDT")) if profile else []
+    _retro_pick = rcols[0].selectbox(
+        "Open symbol",
+        ["(none)"] + sorted(_retro_syms),
+        index=0,
+        key="retrofit_oco_symbol",
+        help="Pick an existing held symbol to apply/replace with an OCO bracket.",
+    )
+    _retro_sl = float(
+        rcols[1].number_input(
+            "Stop %",
+            min_value=0.1,
+            max_value=80.0,
+            value=float(st.session_state.get("sig_sl_pct", 5.0) or 5.0),
+            step=0.5,
+            key="retrofit_oco_sl_pct",
+        )
+    )
+    _retro_tp = float(
+        rcols[2].number_input(
+            "TP %",
+            min_value=0.1,
+            max_value=300.0,
+            value=float(st.session_state.get("sig_tp_pct", 10.0) or 10.0),
+            step=1.0,
+            key="retrofit_oco_tp_pct",
+        )
+    )
+    _retro_replace = bool(
+        rcols[3].checkbox(
+            "Replace existing protection",
+            value=True,
+            key="retrofit_oco_replace_existing",
+            help="Cancels existing SELL protection orders for this symbol before placing fresh OCO.",
+        )
+    )
+    _retro_use_total = bool(
+        rcols[4].checkbox(
+            "Use total position qty",
+            value=True,
+            key="retrofit_oco_use_total",
+            help="ON uses total held qty. OFF uses free qty only.",
+        )
+    )
+    rcols2 = st.columns([2, 2, 2])
+    _retro_use_pipeline = bool(
+        rcols2[0].checkbox(
+            "Use Live > BT > AI values",
+            value=False,
+            key="retrofit_oco_use_live_bt_ai",
+            help="Derive stop/take-profit from Live+Backtest+AI context for this symbol.",
+        )
+    )
+    _retro_ai_only = bool(
+        rcols2[1].checkbox(
+            "AI-only values (no fallback)",
+            value=bool(st.session_state.get("sig_ai_only_oco", False)),
+            key="retrofit_oco_ai_only",
+            help="If ON and AI does not return SL/TP, retrofit fails instead of using percentage fallback.",
+        )
+    )
+    rcols2[2].caption("Tip: if AI mode is OFF, SL/TP percentages are used.")
+    do_preview_retrofit = st.button("Preview OCO Values", disabled=(not bool(profile) or _retro_pick == "(none)"))
+    do_retrofit_oco = st.button("Retrofit Selected to OCO", disabled=(not bool(profile) or _retro_pick == "(none)"))
+
+    if do_preview_retrofit and profile and _retro_pick != "(none)":
+        base_px = 0.0
+        lp_prev = bridge.get_binance_last_price(symbol=str(_retro_pick), profile_name=profile)
+        if lp_prev.get("ok"):
+            try:
+                base_px = float(lp_prev.get("price", 0.0) or 0.0)
+            except Exception:
+                base_px = 0.0
+        preview_src = "fallback"
+        sl_prev = base_px * (1.0 - float(_retro_sl) / 100.0) if base_px > 0 else 0.0
+        tp_prev = base_px * (1.0 + float(_retro_tp) / 100.0) if base_px > 0 else 0.0
+        if bool(_retro_use_pipeline):
+            picked_lp = "" if protect_live_profile_pick == "(current live settings)" else str(protect_live_profile_pick)
+            dprev = _run_task(
+                "Preview OCO from Live->BT->AI",
+                lambda p=profile, s=str(_retro_pick), lp=picked_lp, strict=bool(_retro_ai_only), sl=float(_retro_sl), tp=float(_retro_tp): _derive_oco_prices_live_bt_ai(
+                    profile=p,
+                    symbol=s,
+                    live_profile_name=lp,
+                    strict_ai_values=strict,
+                    fallback_stop_pct=sl,
+                    fallback_tp_pct=tp,
+                ),
+            )
+            if dprev.get("ok"):
+                if not bool(dprev.get("fallback", False)):
+                    preview_src = "AI"
+                    sl_prev = float(dprev.get("stop", 0.0) or 0.0)
+                    tp_prev = float(dprev.get("tp", 0.0) or 0.0)
+                else:
+                    preview_src = "fallback"
+            else:
+                st.error(str(dprev.get("error", "Preview derivation failed")))
+        rr = 0.0
+        if base_px > 0 and sl_prev > 0 and tp_prev > 0 and (base_px - sl_prev) > 0:
+            rr = (tp_prev - base_px) / (base_px - sl_prev)
+        pc_prev = st.columns(4)
+        pc_prev[0].metric("Preview source", preview_src.upper())
+        pc_prev[1].metric("Last price", f"{base_px:.8f}" if base_px > 0 else "n/a")
+        pc_prev[2].metric("Stop / TP", f"{sl_prev:.8f} / {tp_prev:.8f}" if sl_prev > 0 and tp_prev > 0 else "n/a")
+        pc_prev[3].metric("Est. R:R", f"{rr:.2f}" if rr > 0 else "n/a")
 
     if do_pf and profile:
         out = _run_task("Portfolio Refresh", lambda: bridge.fetch_binance_portfolio(profile_name=profile))
@@ -2289,7 +3090,7 @@ with tab_portfolio:
             df = pd.DataFrame(out.get("balances", []) or [])
             st.session_state.last_portfolio_df = df
             if not df.empty:
-                _show_df(df, use_container_width=True, hide_index=True)
+                _show_df(df, width="stretch", hide_index=True)
 
     if do_oo and profile:
         out = _run_task("Open Orders Refresh", lambda: bridge.list_open_binance_orders(profile_name=profile))
@@ -2300,9 +3101,10 @@ with tab_portfolio:
             df = pd.DataFrame(out.get("orders", []) or [])
             st.session_state.last_open_orders_df = df
             if not df.empty:
-                _show_df(df, use_container_width=True, hide_index=True)
+                _show_df(df, width="stretch", hide_index=True)
             else:
                 st.info("No open orders.")
+            _sync_pending_statuses(profile)
 
     if do_led:
         out = _run_task("Ledger Refresh", lambda: bridge.get_trade_ledger())
@@ -2315,7 +3117,7 @@ with tab_portfolio:
             if entries:
                 df = pd.DataFrame(entries)
                 st.session_state.last_ledger_df = df
-                _show_df(df, use_container_width=True, hide_index=True)
+                _show_df(df, width="stretch", hide_index=True)
     if do_rec and profile:
         syms = _portfolio_symbols_for_profile(profile=profile, quote_pref=str(st.session_state.get("live_quote", "USDT")))
         if not syms:
@@ -2332,6 +3134,7 @@ with tab_portfolio:
             out = _run_task("Reconcile Fills", lambda: bridge.reconcile_binance_fills(profile_name=profile, symbols=syms))
         if out.get("ok"):
             st.success(f"Reconcile added={int(out.get('added', 0) or 0)}, dup={int(out.get('duplicates', 0) or 0)}")
+            _sync_pending_statuses(profile)
         else:
             st.error(out.get("error", "Reconcile failed"))
     if do_review and profile:
@@ -2342,9 +3145,61 @@ with tab_portfolio:
         if out.get("ok"):
             rdf = pd.DataFrame(out.get("rows", []) or [])
             st.session_state.last_review_df = rdf
-            _show_df(rdf, use_container_width=True, hide_index=True)
+            _show_df(rdf, width="stretch", hide_index=True)
         else:
             st.error(out.get("error", "Review failed"))
+    if do_retrofit_oco and profile:
+        pick_sym = str(st.session_state.get("retrofit_oco_symbol", "(none)") or "(none)")
+        if pick_sym == "(none)":
+            st.warning("Pick a symbol first.")
+        else:
+            ex_sl = 0.0
+            ex_tp = 0.0
+            if bool(_retro_use_pipeline):
+                picked_lp = "" if protect_live_profile_pick == "(current live settings)" else str(protect_live_profile_pick)
+                d = _run_task(
+                    "Derive OCO from Live->BT->AI",
+                    lambda p=profile, s=pick_sym, lp=picked_lp, strict=bool(_retro_ai_only), sl=float(_retro_sl), tp=float(_retro_tp): _derive_oco_prices_live_bt_ai(
+                        profile=p,
+                        symbol=s,
+                        live_profile_name=lp,
+                        strict_ai_values=strict,
+                        fallback_stop_pct=sl,
+                        fallback_tp_pct=tp,
+                    ),
+                )
+                if not d.get("ok"):
+                    st.error(str(d.get("error", "Could not derive OCO values from Live>BT>AI.")))
+                    d = {}
+                else:
+                    if not bool(d.get("fallback", False)):
+                        ex_sl = float(d.get("stop", 0.0) or 0.0)
+                        ex_tp = float(d.get("tp", 0.0) or 0.0)
+                        st.info(f"Using Live>BT>AI OCO values: SL={ex_sl:.8f}, TP={ex_tp:.8f}")
+                    else:
+                        st.info("Live>BT>AI did not return SL/TP for symbol; using % fallback.")
+            out = _run_task(
+                "Retrofit Selected Position to OCO",
+                lambda p=profile, s=pick_sym, sl=float(_retro_sl), tp=float(_retro_tp), rep=bool(_retro_replace), ut=bool(_retro_use_total), es=float(ex_sl), et=float(ex_tp): _retrofit_symbol_to_oco(
+                    profile=p,
+                    symbol=s,
+                    stop_loss_pct=sl,
+                    take_profit_pct=tp,
+                    replace_existing=rep,
+                    use_total_qty=ut,
+                    explicit_stop_price=es,
+                    explicit_take_profit_price=et,
+                ),
+            )
+            if out.get("ok"):
+                st.success(
+                    f"OCO set for {out.get('symbol')} qty={float(out.get('qty', 0.0) or 0.0):.8f} | "
+                    f"SL={float(out.get('stop', 0.0) or 0.0):.8f} TP={float(out.get('tp', 0.0) or 0.0):.8f}"
+                )
+                bridge.list_open_binance_orders(profile_name=profile)
+                _sync_pending_statuses(profile)
+            else:
+                st.error(str(out.get("error", "Retrofit OCO failed")))
     if do_protect and profile:
         out = _run_task("Protect Open Positions (AI+BT)", lambda: _protect_open_positions_simple(profile, auto_submit=bool(auto_send_protect)))
         if out.get("ok"):
@@ -2364,6 +3219,167 @@ with tab_portfolio:
             st.success(f"Protection ({mode_txt}) staged={int(out.get('staged', 0) or 0)}, submitted={int(out.get('submitted', 0) or 0)}")
         else:
             st.error(out.get("error", "Protect failed"))
+    if do_unified and profile:
+        picked_lp = "" if protect_live_profile_pick == "(current live settings)" else str(protect_live_profile_pick)
+        out = _run_task(
+            "Unified Cycle (Manage+Discover)",
+            lambda p=profile, lp=picked_lp, asp=bool(auto_send_protect), asn=bool(auto_submit_unified_new): _run_unified_cycle_sync(
+                profile=p,
+                live_profile_name=lp,
+                auto_send_protect=asp,
+                auto_submit_new=asn,
+                dt_context=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                signal_order_type=str(unified_signal_order_type or "as_ai"),
+                post_buy_protection_mode=str(unified_post_buy_mode or "none"),
+                ai_only_oco_values=bool(st.session_state.get("sig_ai_only_oco", False)),
+            ),
+        )
+        if out.get("ok"):
+            st.success(f"Unified complete: {str(out.get('summary_text', '') or '').strip()}")
+        else:
+            st.error(f"Unified Cycle failed at {out.get('stage', 'unknown')}: {out.get('error', 'unknown error')}")
+
+    st.markdown("### Unified Monitor")
+    um1, um2, um3, um4, um5 = st.columns([1, 1, 1, 1, 2])
+    unified_interval = int(
+        um1.number_input(
+            "Every (min)",
+            min_value=5,
+            max_value=1440,
+            value=int(st.session_state.get("unified_monitor_interval_min", 30) or 30),
+            step=5,
+            key="unified_monitor_interval_min",
+        )
+    )
+    unified_24x7 = bool(
+        um2.checkbox(
+            "24x7",
+            value=bool(st.session_state.get("unified_monitor_24x7", True)),
+            key="unified_monitor_24x7",
+            help="If off, monitor runs only during 06:00-23:00 local time.",
+        )
+    )
+    start_unified = um3.button("Start Unified Monitor", disabled=not bool(profile))
+    stop_unified = um4.button("Stop Unified Monitor")
+    if start_unified and profile:
+        picked_lp = "" if protect_live_profile_pick == "(current live settings)" else str(protect_live_profile_pick)
+        st.session_state.unified_monitor_enabled = True
+        st.session_state.unified_monitor_next_epoch = time.time() + 2.0
+        st.session_state.unified_monitor_last_epoch = 0.0
+        st.session_state.unified_monitor_busy = False
+        st.session_state.unified_monitor_live_profile = picked_lp
+        st.session_state.unified_monitor_auto_send_protect = bool(auto_send_protect)
+        st.session_state.unified_monitor_auto_submit_new = bool(auto_submit_unified_new)
+        st.session_state.unified_monitor_signal_order_type = str(unified_signal_order_type or "as_ai")
+        st.session_state.unified_monitor_post_buy_mode = str(unified_post_buy_mode or "none")
+        st.session_state.unified_monitor_ai_only_oco = bool(st.session_state.get("sig_ai_only_oco", False))
+        st.success("Unified Monitor started.")
+        st.rerun()
+    if stop_unified:
+        st.session_state.unified_monitor_enabled = False
+        st.session_state.unified_monitor_busy = False
+        st.info("Unified Monitor stopped.")
+        st.rerun()
+    um_on = bool(st.session_state.get("unified_monitor_enabled", False))
+    um_busy = bool(st.session_state.get("unified_monitor_busy", False))
+    um_next = float(st.session_state.get("unified_monitor_next_epoch", 0.0) or 0.0)
+    um_started = float(st.session_state.get("unified_monitor_started_epoch", 0.0) or 0.0)
+    if um_busy:
+        elapsed = max(0.0, time.time() - um_started) if um_started > 0 else 0.0
+        um5.caption(f"Status: RUNNING ({elapsed:.1f}s) | Next run: after current cycle completes")
+    else:
+        um_next_txt = datetime.fromtimestamp(um_next).strftime("%Y-%m-%d %H:%M:%S") if um_next > 0 else "-"
+        um5.caption(f"Status: {'ACTIVE' if um_on else 'OFF'} | Next run: {um_next_txt}")
+    um_last = str(st.session_state.get("unified_monitor_last_summary", "") or "").strip()
+    if um_last:
+        st.caption(f"Last run: {um_last}")
+    hist = st.session_state.get("unified_monitor_history", [])
+    if isinstance(hist, list) and hist:
+        st.caption("Recent monitor runs")
+        _show_df(pd.DataFrame(hist[-20:]), width="stretch", hide_index=True, height=220)
+
+    @st.fragment(run_every=("5s" if um_on else None))
+    def _unified_monitor_fragment() -> None:
+        if not bool(st.session_state.get("unified_monitor_enabled", False)):
+            return
+        if bool(st.session_state.get("unified_monitor_busy", False)):
+            return
+        if not bool(st.session_state.get("unified_monitor_24x7", True)):
+            hour = datetime.now().hour
+            if hour < 6 or hour >= 23:
+                return
+        nxt = float(st.session_state.get("unified_monitor_next_epoch", 0.0) or 0.0)
+        if nxt > 0 and time.time() < nxt:
+            return
+        prof = str(profile or "")
+        if not prof:
+            return
+        st.session_state.unified_monitor_busy = True
+        st.session_state.unified_monitor_started_epoch = time.time()
+        try:
+            out = _run_task(
+                "Unified Cycle (scheduled)",
+                lambda p=prof: _run_unified_cycle_sync(
+                    profile=p,
+                    live_profile_name=str(st.session_state.get("unified_monitor_live_profile", "") or ""),
+                    auto_send_protect=bool(st.session_state.get("unified_monitor_auto_send_protect", False)),
+                    auto_submit_new=bool(st.session_state.get("unified_monitor_auto_submit_new", False)),
+                    dt_context=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    signal_order_type=str(st.session_state.get("unified_monitor_signal_order_type", "as_ai") or "as_ai"),
+                    post_buy_protection_mode=str(st.session_state.get("unified_monitor_post_buy_mode", "none") or "none"),
+                    ai_only_oco_values=bool(st.session_state.get("unified_monitor_ai_only_oco", False)),
+                ),
+            )
+            if out.get("ok"):
+                stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                st.session_state.unified_monitor_last_summary = f"{stamp} {str(out.get('summary_text', '') or '').strip()}"
+                h = st.session_state.get("unified_monitor_history", [])
+                if not isinstance(h, list):
+                    h = []
+                h.append(
+                    {
+                        "ts": stamp,
+                        "status": "OK",
+                        "protect_staged": int(out.get("protect_staged", 0) or 0),
+                        "protect_submitted": int(out.get("protect_submitted", 0) or 0),
+                        "new_parsed": int(out.get("new_parsed", 0) or 0),
+                        "new_eligible": int(out.get("new_eligible", 0) or 0),
+                        "new_staged": int(out.get("new_staged", 0) or 0),
+                        "new_submitted": int(out.get("new_submitted", 0) or 0),
+                        "new_failed": int(out.get("new_failed", 0) or 0),
+                        "note": str(out.get("note", "") or ""),
+                    }
+                )
+                st.session_state.unified_monitor_history = h[-200:]
+            else:
+                stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                st.session_state.unified_monitor_last_summary = f"{stamp} failed at {out.get('stage', 'unknown')}: {out.get('error', 'unknown error')}"
+                h = st.session_state.get("unified_monitor_history", [])
+                if not isinstance(h, list):
+                    h = []
+                h.append(
+                    {
+                        "ts": stamp,
+                        "status": "FAILED",
+                        "protect_staged": 0,
+                        "protect_submitted": 0,
+                        "new_parsed": 0,
+                        "new_eligible": 0,
+                        "new_staged": 0,
+                        "new_submitted": 0,
+                        "new_failed": 0,
+                        "note": f"{out.get('stage', 'unknown')}: {out.get('error', 'unknown error')}",
+                    }
+                )
+                st.session_state.unified_monitor_history = h[-200:]
+        finally:
+            st.session_state.unified_monitor_last_epoch = time.time()
+            st.session_state.unified_monitor_next_epoch = time.time() + (max(5, int(st.session_state.get("unified_monitor_interval_min", 30) or 30)) * 60)
+            st.session_state.unified_monitor_busy = False
+            st.session_state.unified_monitor_started_epoch = 0.0
+        st.rerun()
+
+    _unified_monitor_fragment()
     if do_prune:
         out = _run_task("Prune Signal History", lambda: bridge.prune_signal_only_history(keep_last_signals=0))
         if out.get("ok"):
@@ -2377,11 +3393,30 @@ with tab_portfolio:
     st.markdown("### Pending Recommendations")
     pdf = _pending_df()
     if not pdf.empty:
-        _show_df(pdf, use_container_width=True, hide_index=True)
         all_ids = [int(x) for x in pdf["id"].tolist()]
-        selected = st.multiselect("Select pending IDs", options=all_ids, default=st.session_state.selected_pending_ids)
+        _all_id_set = set(all_ids)
+        _raw_selected = st.session_state.selected_pending_ids if isinstance(st.session_state.selected_pending_ids, list) else []
+        _selected_defaults = [int(x) for x in _raw_selected if str(x).strip().isdigit() and int(x) in _all_id_set]
+        select_mask = [int(i) in set(_selected_defaults) for i in all_ids]
+        pending_ui = pdf.copy()
+        pending_ui.insert(0, "select", select_mask)
+        edited = st.data_editor(
+            pending_ui,
+            width="stretch",
+            hide_index=True,
+            num_rows="fixed",
+            disabled=[c for c in pending_ui.columns if c != "select"],
+            column_config={"select": st.column_config.CheckboxColumn("Select", help="Tick rows to submit/remove.")},
+            key="pending_recs_editor",
+        )
+        selected = []
+        try:
+            selected = [int(x) for x in edited.loc[edited["select"] == True, "id"].tolist()]  # noqa: E712
+        except Exception:
+            selected = []
         st.session_state.selected_pending_ids = selected
-        pc = st.columns(4)
+        st.caption(f"Selected: {len(selected)} of {len(all_ids)}")
+        pc = st.columns(6)
         if pc[0].button("Submit Selected", disabled=not bool(profile)):
             ok_n = 0
             fail_n = 0
@@ -2390,25 +3425,36 @@ with tab_portfolio:
                 if not rec:
                     continue
                 out_sub = _submit_with_recovery(profile, rec, enable_recovery=bool(st.session_state.get("auto_retry_locked_sell", True)))
-                rec["status"] = "SUBMITTED" if out_sub.get("ok") else "FAILED"
-                rec["reason"] = str(rec.get("reason", "")) + (
-                    f" | {out_sub.get('recovery_note', 'submitted')}" if out_sub.get("ok") else f" | {out_sub.get('error', 'submit failed')}"
-                )
-                if out_sub.get("ok"):
+                if _apply_submit_result_to_rec(rec, out_sub):
                     ok_n += 1
                 else:
                     fail_n += 1
+            if profile:
+                _sync_pending_statuses(profile)
+                _compact_pending_queue()
             st.success(f"Submitted={ok_n}, failed={fail_n}")
         if pc[1].button("Remove Selected"):
             ids = set(int(x) for x in selected)
             st.session_state.pending_recs = [r for r in st.session_state.pending_recs if int(r.get("id", -1)) not in ids]
             st.success(f"Removed {len(ids)} selected.")
+            st.rerun()
         if pc[2].button("Clear Pending"):
             st.session_state.pending_recs = []
             st.session_state.selected_pending_ids = []
             st.success("Pending cleared.")
+            st.rerun()
         if pc[3].button("Download Pending CSV"):
             st.download_button("Save pending.csv", data=pdf.to_csv(index=False), file_name="pending_recommendations.csv", mime="text/csv")
+        if pc[4].button("Sync Pending Status", disabled=not bool(profile)):
+            sout = _sync_pending_statuses(profile)
+            if sout.get("ok"):
+                st.success(f"Pending sync updated={int(sout.get('updated', 0) or 0)}, open_orders={int(sout.get('open_orders', 0) or 0)}")
+            else:
+                st.error(str(sout.get("error", "Pending sync failed")))
+        if pc[5].button("Clean Queue"):
+            cout = _compact_pending_queue()
+            st.success(f"Queue cleaned: removed={int(cout.get('removed', 0) or 0)}, remaining={int(cout.get('remaining', 0) or 0)}")
+            st.rerun()
     else:
         st.info("No pending recommendations.")
     st.markdown("### Cached Views")
@@ -2416,20 +3462,20 @@ with tab_portfolio:
     with cv1:
         st.caption("Portfolio (cached)")
         if isinstance(st.session_state.last_portfolio_df, pd.DataFrame) and not st.session_state.last_portfolio_df.empty:
-            _show_df(st.session_state.last_portfolio_df, use_container_width=True, height=220, hide_index=True)
+            _show_df(st.session_state.last_portfolio_df, width="stretch", height=220, hide_index=True)
     with cv2:
         st.caption("Open Orders (cached)")
         if isinstance(st.session_state.last_open_orders_df, pd.DataFrame) and not st.session_state.last_open_orders_df.empty:
-            _show_df(st.session_state.last_open_orders_df, use_container_width=True, height=220, hide_index=True)
+            _show_df(st.session_state.last_open_orders_df, width="stretch", height=220, hide_index=True)
     with cv3:
         st.caption("Open Position Review (cached)")
         if isinstance(st.session_state.last_review_df, pd.DataFrame) and not st.session_state.last_review_df.empty:
-            _show_df(st.session_state.last_review_df, use_container_width=True, height=220, hide_index=True)
+            _show_df(st.session_state.last_review_df, width="stretch", height=220, hide_index=True)
     st.caption("Ledger (cached)")
     if isinstance(st.session_state.last_ledger_df, pd.DataFrame) and not st.session_state.last_ledger_df.empty:
-        _show_df(st.session_state.last_ledger_df, use_container_width=True, height=260, hide_index=True)
+        _show_df(st.session_state.last_ledger_df, width="stretch", height=260, hide_index=True)
 
-    st.markdown("### FIFO Open→Close PnL Tracker")
+    st.markdown("### FIFO Open-to-Close PnL Tracker")
     fifo_profile = profile or _active_or_first_binance_profile()
     fifo = _fifo_open_close_journal(st.session_state.last_ledger_df, profile_name=str(fifo_profile or ""))
     fs = fifo.get("summary", {}) if isinstance(fifo.get("summary"), dict) else {}
@@ -2439,16 +3485,16 @@ with tab_portfolio:
     f1.metric("Closed matches (FIFO)", f"{int(fs.get('closed_rows', 0) or 0)}")
     f2.metric("Open lots (FIFO)", f"{int(fs.get('open_lots', 0) or 0)}")
     f3.metric("Realized PnL (quote)", f"{float(fs.get('realized_quote', 0.0) or 0.0):,.6f}")
-    t1, t2 = st.tabs(["Closed (Open→Close)", "Open Lots"])
+    t1, t2 = st.tabs(["Closed (Open->Close)", "Open Lots"])
     with t1:
         if isinstance(fc, pd.DataFrame) and not fc.empty:
-            _show_df(fc, use_container_width=True, hide_index=True, height=320)
+            _show_df(fc, width="stretch", hide_index=True, height=320)
             st.download_button("Export FIFO Closed CSV", data=fc.to_csv(index=False), file_name="fifo_closed_pnl.csv", mime="text/csv", key="fifo_closed_export")
         else:
             st.info("No closed FIFO matches yet.")
     with t2:
         if isinstance(fo, pd.DataFrame) and not fo.empty:
-            _show_df(fo, use_container_width=True, hide_index=True, height=320)
+            _show_df(fo, width="stretch", hide_index=True, height=320)
             st.download_button("Export FIFO Open Lots CSV", data=fo.to_csv(index=False), file_name="fifo_open_lots.csv", mime="text/csv", key="fifo_open_export")
         else:
             st.info("No open FIFO lots.")
@@ -2459,7 +3505,7 @@ with tab_graph:
     profile = _safe_select_option("Binance profile (graph)", names, preferred=(names[0] if names else ""))
     quote_pref = st.selectbox("Quote", ["USDT", "USD", "USDC", "BUSD", "BTC", "ETH", "BNB"], index=0, key="graph_quote")
     g1, g2, g3 = st.columns([1, 1, 2])
-    graph_auto = g1.checkbox("Auto-refresh", value=bool(st.session_state.get("graph_auto_refresh", True)), key="graph_auto_refresh")
+    graph_auto = g1.checkbox("Auto-refresh", value=bool(st.session_state.get("graph_auto_refresh", False)), key="graph_auto_refresh")
     graph_interval = int(g2.number_input("Every (sec)", min_value=5, max_value=300, value=20, step=5, key="graph_interval_sec"))
     refresh_now = g3.button("Refresh Position Graph Data", type="primary", disabled=not bool(profile), key="graph_refresh_btn")
 
@@ -2491,7 +3537,7 @@ with tab_graph:
             _refresh_graph_once()
         if isinstance(st.session_state.last_graph_df, pd.DataFrame) and not st.session_state.last_graph_df.empty:
             st.caption("Latest position graph data")
-            _show_df(st.session_state.last_graph_df, use_container_width=True, hide_index=True)
+            _show_df(st.session_state.last_graph_df, width="stretch", hide_index=True)
             _render_position_graph_visuals(st.session_state.last_graph_df)
         else:
             st.info("No cached graph data yet. Click refresh.")
@@ -2519,7 +3565,7 @@ with tab_graph:
         pb = _compute_pnl_breakdown(st.session_state.last_graph_df, led_df)
         s = pb.get("summary", pd.DataFrame())
         if isinstance(s, pd.DataFrame) and not s.empty:
-            _show_df(s, use_container_width=True, hide_index=True)
+            _show_df(s, width="stretch", hide_index=True)
             fig_sum = go.Figure()
             fig_sum.add_trace(go.Bar(name="Realized", x=s["window"], y=s["realized_quote"]))
             fig_sum.add_trace(go.Bar(name="Unrealized (current)", x=s["window"], y=s["unrealized_quote"]))
@@ -2532,34 +3578,34 @@ with tab_graph:
                 xaxis_title="Window",
                 yaxis_title="PnL (quote)",
             )
-            st.plotly_chart(fig_sum, use_container_width=True)
+            st.plotly_chart(fig_sum, width="stretch")
 
         t1, t2, t3, t4 = st.tabs(["Daily", "Weekly", "Monthly", "Yearly"])
         with t1:
             d = pb.get("daily", pd.DataFrame())
             if isinstance(d, pd.DataFrame) and not d.empty:
-                _show_df(d, use_container_width=True, hide_index=True)
+                _show_df(d, width="stretch", hide_index=True)
                 st.bar_chart(d.set_index("period")["realized_quote"])
             else:
                 st.info("No realized daily history yet.")
         with t2:
             d = pb.get("weekly", pd.DataFrame())
             if isinstance(d, pd.DataFrame) and not d.empty:
-                _show_df(d, use_container_width=True, hide_index=True)
+                _show_df(d, width="stretch", hide_index=True)
                 st.bar_chart(d.set_index("period")["realized_quote"])
             else:
                 st.info("No realized weekly history yet.")
         with t3:
             d = pb.get("monthly", pd.DataFrame())
             if isinstance(d, pd.DataFrame) and not d.empty:
-                _show_df(d, use_container_width=True, hide_index=True)
+                _show_df(d, width="stretch", hide_index=True)
                 st.bar_chart(d.set_index("period")["realized_quote"])
             else:
                 st.info("No realized monthly history yet.")
         with t4:
             d = pb.get("yearly", pd.DataFrame())
             if isinstance(d, pd.DataFrame) and not d.empty:
-                _show_df(d, use_container_width=True, hide_index=True)
+                _show_df(d, width="stretch", hide_index=True)
                 st.bar_chart(d.set_index("period")["realized_quote"])
             else:
                 st.info("No realized yearly history yet.")
@@ -2604,7 +3650,7 @@ with tab_tasks:
     if tc[1].button("Clear Task History"):
         st.session_state.task_history = []
     tc[2].write(f"Log lines: {len(st.session_state.task_logs)}")
-    auto_mon = st.checkbox("Live monitor refresh (1s)", value=True, key="task_monitor_auto_refresh")
+    auto_mon = st.checkbox("Live monitor refresh (1s)", value=bool(st.session_state.get("task_monitor_auto_refresh", False)), key="task_monitor_auto_refresh")
     mon_every = "1s" if auto_mon else None
 
     @st.fragment(run_every=mon_every)
@@ -2628,7 +3674,7 @@ with tab_tasks:
             )
         if active_rows:
             st.caption("Background jobs (exact state)")
-            _show_df(pd.DataFrame(active_rows), use_container_width=True, hide_index=True)
+            _show_df(pd.DataFrame(active_rows), width="stretch", hide_index=True)
             jid_pick = st.selectbox(
                 "Verbose job output",
                 ["(none)"] + [str(r["job_id"]) for r in active_rows],
@@ -2645,7 +3691,7 @@ with tab_tasks:
                     st.info("No verbose lines captured yet for this job.")
         st.text_area("Global Task Log", value="\n".join(st.session_state.task_logs), height=260)
         hist_df = pd.DataFrame(st.session_state.task_history) if st.session_state.task_history else pd.DataFrame(columns=["task", "sec", "ts", "ok"])
-        _show_df(hist_df, use_container_width=True, hide_index=True)
+        _show_df(hist_df, width="stretch", hide_index=True)
 
     _task_monitor_fragment()
 

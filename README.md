@@ -258,17 +258,50 @@ GUI Portfolio & Ledger:
     - `Start/Stop Protect Monitor`
     - optional `Auto-send protection` to submit newly staged protective orders without confirmation prompts
   - Protection generation now runs as a background task to avoid GUI freeze during heavy AI/backtest processing.
+  - `Unified Cycle (Manage + Discover)` action:
+    - step 1: manage current holdings (`Protect Open Positions (Live > BT > AI)`)
+    - step 2: discover and stage new opportunities (`Live > BT > AI > Stage`)
+    - optional auto-submit toggle for newly discovered entries
+    - explicit Unified controls for:
+      - new-entry order type override (`as_ai`, `MARKET`, `LIMIT`, `STOP_LOSS_LIMIT`, `TAKE_PROFIT_LIMIT`, `OCO_BRACKET`)
+      - BUY follow-up protection mode (`none`, `oco`)
+    - OCO safety guard: recommendations requiring OCO are now dropped if both SL and TP are unavailable (instead of staging invalid OCO rows)
+    - protective price guard: when OCO/BUY-follow-up-oco is selected, missing SL/TP fields are auto-filled from configured SL/TP percentages when price data is available
+    - keeps outputs synchronized into Live/Backtest/AI cached panes
+  - `Unified Monitor` automation controls:
+    - start/stop scheduled Unified Cycle
+    - configurable interval in minutes
+    - single-instance guard (no overlapping runs)
+    - optional 24x7 mode (or local-hour window 06:00-23:00)
+    - last-run summary + next-run timestamp
+    - recent-run table with parsed/eligible/staged/submitted counts and explicit "no recommendations" notes
   - `Review Open Positions (MTF)` action:
     - evaluates open-position assets across `4h/8h/12h/1d`
     - logs per-timeframe actions and vote-based stance (`HOLD/ADD`, `HOLD`, `REDUCE/EXIT`)
   - Signal import from latest live dashboard output
   - Duplicate-signal activity guard (cooldown-based) to reduce repeated same-signal actions
+  - Pending recommendation lifecycle improvements:
+    - submit attempts now persist exchange order references (when returned)
+    - `Sync Pending Status` action reconciles pending rows against Binance open orders + reconciled ledger fills
+    - statuses now progress more clearly (`PENDING` -> `SUBMITTED/OPEN` -> `FILLED` where fill evidence exists)
+    - `Clean Queue` action archives/removes stale non-actionable rows (`OPEN/FILLED/CANCELED/EXPIRED`) from pending queue
+    - pending selection UX now uses row checkboxes in-table (faster than ID multiselect)
+  - Unified Cycle preflight now refreshes exchange state (`reconcile fills + open orders snapshot`) before protection/discovery steps
+  - Manual protection retrofit:
+    - `Retrofit Selected Position to OCO` in Portfolio tab
+    - select a held symbol, set stop/take-profit percentages, and apply OCO directly
+    - optional replace mode cancels existing SELL protection orders for that symbol before submitting the fresh OCO
+    - optional `Use Live > BT > AI values` derives SL/TP from pipeline context for the selected symbol before retrofit
+    - optional `AI-only values (no fallback)` fails fast when AI does not provide SL/TP instead of using percentage fallback
   - Manual ledger event entry (`BUY/SELL/HOLD`)
   - Current open-position tracking + historical ledger view
 
 GUI Position Graph:
 
 - New end-tab `Position Graph` provides a visual view of open positions.
+- Open-position inclusion is portfolio-authoritative when Binance portfolio fetch succeeds:
+  - assets not currently held are excluded from open-position rows,
+  - stale ledger/order-only symbols are ignored (fallback to order-derived inference only when portfolio fetch fails).
 - Per position, the graph shows:
   - entry marker
   - current price marker
@@ -280,6 +313,9 @@ GUI Position Graph:
   - Pending queue can now size selected rows by quote notional target (for example USDT amount) instead of raw qty
   - Pending table shows estimated quote notional and symbol min-notional for faster filter debugging
   - submit flow now retries OCO with auto-bumped qty when Binance min-notional fails (if available balance allows)
+  - BUY autosizing now enforces Binance `minNotional`:
+    - quote-notional is auto-bumped to minimum when balance allows,
+    - recommendations are dropped early when quote balance is below `minNotional`.
   - auto-sizing for selected pending trades:
     - BUY uses configurable `%` of available quote balance (for example USDT)
     - SELL uses configurable `%` of available base-asset balance
