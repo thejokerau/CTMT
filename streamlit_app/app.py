@@ -232,6 +232,17 @@ def _run_unified_cycle_sync(
     signal_order_type: str = "as_ai",
     post_buy_protection_mode: str = "none",
 ) -> Dict[str, Any]:
+    # Preflight: refresh exchange state so protection/discovery runs on latest fills/orders.
+    try:
+        qpref = str(st.session_state.get("sig_quote", st.session_state.get("live_quote", "USDT")) or "USDT").strip().upper() or "USDT"
+        syms = _portfolio_symbols_for_profile(profile=profile, quote_pref=qpref)
+        if syms:
+            bridge.reconcile_binance_fills(profile_name=profile, symbols=syms)
+        bridge.list_open_binance_orders(profile_name=profile)
+        _sync_pending_statuses(profile)
+    except Exception as ex:
+        _log(f"Unified preflight warning: {ex}")
+
     # 1) Manage existing positions.
     protect_out = _protect_open_positions_live_bt_ai(
         profile=profile,
@@ -369,6 +380,7 @@ def _init_state() -> None:
         "task_logs": [],
         "task_history": [],
         "pending_recs": [],
+        "pending_history": [],
         "pending_rec_seq": 0,
         "ai_source_text": "",
         "pending_ai_source_text": "",
@@ -1032,6 +1044,31 @@ def _sync_pending_statuses(profile: str) -> Dict[str, Any]:
             rec["status"] = "SUBMITTED"
             updated += 1
     return {"ok": True, "updated": updated, "open_orders": len(open_orders)}
+
+
+def _compact_pending_queue() -> Dict[str, Any]:
+    rows = st.session_state.pending_recs if isinstance(st.session_state.pending_recs, list) else []
+    history = st.session_state.pending_history if isinstance(st.session_state.pending_history, list) else []
+    keep: List[Dict[str, Any]] = []
+    removed = 0
+    terminal = {"OPEN", "FILLED", "CANCELED", "EXPIRED"}
+    for rec in rows:
+        if not isinstance(rec, dict):
+            continue
+        status = str(rec.get("status", "PENDING") or "PENDING").strip().upper()
+        if status in terminal:
+            rr = dict(rec)
+            rr["archived_ts"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            history.append(rr)
+            removed += 1
+        else:
+            keep.append(rec)
+    st.session_state.pending_recs = keep
+    st.session_state.pending_history = history[-1000:]
+    selected = st.session_state.selected_pending_ids if isinstance(st.session_state.selected_pending_ids, list) else []
+    valid_ids = {int(r.get("id", -1)) for r in keep if isinstance(r, dict)}
+    st.session_state.selected_pending_ids = [int(x) for x in selected if str(x).strip().isdigit() and int(x) in valid_ids]
+    return {"ok": True, "removed": removed, "remaining": len(keep)}
 
 
 def _load_binance_profiles() -> List[str]:
@@ -3000,14 +3037,30 @@ with tab_portfolio:
     st.markdown("### Pending Recommendations")
     pdf = _pending_df()
     if not pdf.empty:
-        _show_df(pdf, width="stretch", hide_index=True)
         all_ids = [int(x) for x in pdf["id"].tolist()]
         _all_id_set = set(all_ids)
         _raw_selected = st.session_state.selected_pending_ids if isinstance(st.session_state.selected_pending_ids, list) else []
         _selected_defaults = [int(x) for x in _raw_selected if str(x).strip().isdigit() and int(x) in _all_id_set]
-        selected = st.multiselect("Select pending IDs", options=all_ids, default=_selected_defaults)
+        select_mask = [int(i) in set(_selected_defaults) for i in all_ids]
+        pending_ui = pdf.copy()
+        pending_ui.insert(0, "select", select_mask)
+        edited = st.data_editor(
+            pending_ui,
+            width="stretch",
+            hide_index=True,
+            num_rows="fixed",
+            disabled=[c for c in pending_ui.columns if c != "select"],
+            column_config={"select": st.column_config.CheckboxColumn("Select", help="Tick rows to submit/remove.")},
+            key="pending_recs_editor",
+        )
+        selected = []
+        try:
+            selected = [int(x) for x in edited.loc[edited["select"] == True, "id"].tolist()]  # noqa: E712
+        except Exception:
+            selected = []
         st.session_state.selected_pending_ids = selected
-        pc = st.columns(5)
+        st.caption(f"Selected: {len(selected)} of {len(all_ids)}")
+        pc = st.columns(6)
         if pc[0].button("Submit Selected", disabled=not bool(profile)):
             ok_n = 0
             fail_n = 0
@@ -3022,6 +3075,7 @@ with tab_portfolio:
                     fail_n += 1
             if profile:
                 _sync_pending_statuses(profile)
+                _compact_pending_queue()
             st.success(f"Submitted={ok_n}, failed={fail_n}")
         if pc[1].button("Remove Selected"):
             ids = set(int(x) for x in selected)
@@ -3039,6 +3093,9 @@ with tab_portfolio:
                 st.success(f"Pending sync updated={int(sout.get('updated', 0) or 0)}, open_orders={int(sout.get('open_orders', 0) or 0)}")
             else:
                 st.error(str(sout.get("error", "Pending sync failed")))
+        if pc[5].button("Clean Queue"):
+            cout = _compact_pending_queue()
+            st.success(f"Queue cleaned: removed={int(cout.get('removed', 0) or 0)}, remaining={int(cout.get('remaining', 0) or 0)}")
     else:
         st.info("No pending recommendations.")
     st.markdown("### Cached Views")

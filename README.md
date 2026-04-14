@@ -284,6 +284,9 @@ GUI Portfolio & Ledger:
     - submit attempts now persist exchange order references (when returned)
     - `Sync Pending Status` action reconciles pending rows against Binance open orders + reconciled ledger fills
     - statuses now progress more clearly (`PENDING` -> `SUBMITTED/OPEN` -> `FILLED` where fill evidence exists)
+    - `Clean Queue` action archives/removes stale non-actionable rows (`OPEN/FILLED/CANCELED/EXPIRED`) from pending queue
+    - pending selection UX now uses row checkboxes in-table (faster than ID multiselect)
+  - Unified Cycle preflight now refreshes exchange state (`reconcile fills + open orders snapshot`) before protection/discovery steps
   - Manual ledger event entry (`BUY/SELL/HOLD`)
   - Current open-position tracking + historical ledger view
 
